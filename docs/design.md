@@ -143,6 +143,104 @@ Two ways to get the router wrong, both of which look fine in a smoke test:
   away. A proxy that does not propagate the disconnect leaves orphaned requests
   generating on a box with no spare GPU to burn.
 
+## Configurations are named and stored, however they were arrived at
+
+Two needs converge here, and they are the same store. **Today:** name and keep a
+configuration -- a `vllm serve` invocation plus its environment -- so one model can be
+run in several shapes and a test matrix can be selected by name rather than by editing
+a file. **Later:** somewhere the fit tiers deposit their answers, because tier 2 and 3
+results cost engine starts and load runs and must not be re-derived while the ground
+under them is unchanged. Entries differ only in provenance, so a derived config and a
+hand-written one are the same object.
+
+### The shell scripts already specify the format
+
+`~/ckpt/run-*.sh` is the mechanism today: one live invocation per file, three or four
+commented-out alternates. The names are already there -- `# 3.00bpw w/turboquant, long
+context`, `# 4.00bpw, real tight`, `# draft model, no turboquant` -- trapped in
+comments where nothing can select them. Read as a spec, the pile says:
+
+- **Args are not a key/value map.** `--cudagraph-capture-sizes 1 2 4` and
+  `--kv-cache-dtype-skip-layers sliding_window boundary:0` take several values.
+- **Some values are JSON with embedded quotes** (`--kv-transfer-config`,
+  `--speculative-config`). Storing the invocation as one string and re-splitting it
+  later mangles exactly these.
+- **Flag syntax is inconsistent within a single file** -- `--kv-cache-memory=1323302912`
+  next to `--gpu-memory-utilization 0.97`. Editing a stored line by text surgery is
+  therefore not a way to change a field, and the fit layer's whole job is changing
+  those fields.
+- **Environment is per-invocation and matters** -- `PYTORCH_CUDA_ALLOC_CONF=...`
+  before the torch import, `EXL3_RECONSTRUCT_THRESHOLD=0` -- so it is part of a
+  configuration, not ambient. (The `unset` in one script is a dev-environment artifact,
+  not a requirement: the image controls the base set exactly, and most such variables
+  take `=0` anyway.)
+
+So: **present the literal command line, store it structured.** The presentation is a
+real requirement, not a convenience -- a config you can paste into a shell is what
+makes this a credible replacement for the scripts, and what stops golite from being a
+place configurations get trapped the way the comments trap them now. Storage is args
+as a list and environment as a map, because the fit layer must rewrite one flag without
+parsing shell.
+
+### An entry that has never launched is a draft, not a configuration
+
+The pile rots because a commented-out block carries no evidence: nothing says whether
+it ever worked, on what, or when. That distinction is most of the cure and is nearly
+free. Every entry carries provenance -- hand-written or derived by which tier, when,
+against which box fingerprint and which fork and plugin versions -- and its last known
+outcome. Which is also what makes "unless something substantive changes underneath"
+mechanical rather than remembered: an entry knows what it depended on, so it can be
+marked stale instead of silently launching a configuration sized for different
+hardware.
+
+That failure is the quiet kind. A stale config still starts; it just serves a budget
+computed for a box you no longer have.
+
+### Linting is the cheapest version of the knowledge layer
+
+Before any fit tier exists, several documented traps are checkable statically against a
+stored entry -- no GPU, no engine start, no download:
+
+- `--max-model-len auto` together with `--max-num-seqs > 1`, which is overcommitted by
+  construction. One of the commented alternates in `run-qwen3.8-27b.sh` is already this
+  shape.
+- `--gpu-memory-utilization` above the box's free/total ratio.
+- A `--kv-cache-memory` pin taken from vLLM's own suggestion, which is biased low.
+
+This is worth building early precisely because it is the guidance layer in its
+cheapest form, and it proves the store is holding enough structure to reason about.
+
+### A database, with an exported view
+
+Configuration has to be **accessible** -- readable and editable by a human and by
+external tools. That is a property of an interface, though, not of the storage: in a
+container the files are not conveniently reachable anyway, and hand-editing them under
+a running manager creates a reconcile problem where either the file or the process has
+to lose. So accessibility is served by import/export and by generated reports, and the
+storage question is decided separately, on volume and complexity.
+
+On that question: **start on SQLite.** Not because the initial data warrants it -- it
+does not -- but because it likely will, and the migration cost is asymmetric. Starting
+there is nearly free; moving later is not. Three things sharpen it:
+
+- **Schema churn is answerable without giving up flexibility.** Store entries as JSON
+  documents with a handful of indexed columns for what is actually queried. Migrations
+  then bite only when a field is promoted to a column, which keeps legacy structure
+  scoped to the code that generates reports rather than spread through the store.
+- **Volume is asymmetric between the two halves.** Named configurations stay small and
+  few. The *evidence* attached to them does not: fit trials, certification runs,
+  transient slopes per call site per depth, start-latency phase breakdowns, each
+  multiplied by model, box and version. Configurations and their evidence are one
+  object conceptually and two tables practically.
+- **Atomic writes matter more here than diffability.** The supervisor writes runtime
+  state while other things read it, and an appliance is meant to run unattended. A
+  crash partway through rewriting a text file corrupts it; the database case is free.
+
+**The requirement this creates:** import and export from the CLI on day one. The
+immediate need is replacing a pile of shell scripts, and that predates any frontend --
+without a text round-trip the store is unusable before the UI exists. Export doubles as
+the report surface, and as the thing an owner can back up and commit.
+
 ## Fit is four tiers, because the cheap ones are structurally blind
 
 The static tier cannot be fixed by better arithmetic. Each of these is a startup

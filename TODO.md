@@ -47,6 +47,63 @@ component and not only a per-construction one, an unattended appliance needs upt
 and RSS monitoring with a restart policy here, in v1 rather than later. Establishing
 which it is comes before deciding. See [docs/design.md](docs/design.md).
 
+## `config-store` -- Named configurations, and the place derived answers land
+
+Name and store a configuration -- a `vllm serve` invocation plus its environment --
+so one model can be run in several shapes and a test matrix can be selected by name.
+Unblocks `engine-supervisor` (which needs something to launch) and every fit tier
+(which needs somewhere to put an answer that cost an engine start to produce).
+
+**Wanted now, independent of the guidance work.** The mechanism today is
+`~/ckpt/run-*.sh`: one live invocation per file and three or four commented-out
+alternates whose intent survives only as a comment. It is unpleasant to use and rots
+silently, because a commented block records no evidence that it ever worked.
+
+**Candidate approach:** present the literal command line, store it structured -- args
+as a list, environment as a map with explicit unsets. Presentation is the candidate
+because paste-ability into a shell is what makes this a real replacement for the
+scripts; structured storage is the candidate because the fit layer has to rewrite
+individual flags, and the existing scripts already contain multi-valued flags,
+JSON-valued flags with embedded quotes, and two different syntaxes for passing a
+value -- all of which defeat text surgery on a stored line.
+
+Two properties worth having from the first version, both cheap and both expensive to
+retrofit: **every entry carries provenance** (hand-written or derived by which tier,
+when, against which box fingerprint and fork/plugin versions) so staleness is
+mechanical rather than remembered; and **an entry that has never launched is a
+draft**, which is most of the cure for the rot.
+
+Then `config-lint`: the documented traps are statically checkable against a stored
+entry with no GPU and no engine start (`--max-model-len auto` with `--max-num-seqs >
+1`, `--gpu-memory-utilization` above the box's free/total ratio, a `--kv-cache-memory`
+pin inherited from vLLM's own low-biased suggestion). It is the knowledge layer in its
+cheapest possible form and a good test of whether the store holds enough structure.
+See [docs/design.md](docs/design.md).
+
+## `auto-context` -- make concurrency an input to sizing, not an afterthought
+
+`--max-model-len auto:N` -- the largest context that leaves room for `N` concurrent
+requests. Unblocks the trap `config-lint` can only detect: `auto` alone sets
+`max_model_len` *to* the KV capacity, so "Maximum concurrency: 1.00x" is a tautology
+and any `--max-num-seqs > 1` on such a config is overcommitted by construction. Lint
+flags it; this removes it.
+
+**Candidate approach:** parse the suffix and call vLLM's own
+`estimate_max_model_len(vllm_config, kv_cache_spec, available_memory)` in
+`vllm/v1/core/kv_cache_utils.py` with `available_memory // N`. It already binary
+searches for exactly this quantity and restores the config it borrowed; today it is
+called only to make a "doesn't fit" error friendlier. That is the candidate because the
+arithmetic exists and is upstream's own, and because the call needs a profiled engine --
+so it belongs inside engine init rather than reimplemented in the manager.
+
+**It belongs upstream**, and is worth more there than here. Carry it in the fork
+meanwhile, as a patch shaped for submission rather than a golite feature -- this project
+has paid repeatedly for maintaining what upstream would have taken.
+
+Migrated from `vllm-virtualkv-plugin`'s TODO, where it was recorded so as not to be lost
+but was explicitly not that plugin's business. Removing it there is still outstanding.
+See [docs/design.md](docs/design.md).
+
 ## `router` -- One endpoint that survives engine restarts
 
 A stable OpenAI-compatible address, so client configs are not rewritten on every
