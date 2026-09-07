@@ -80,6 +80,43 @@ pin inherited from vLLM's own low-biased suggestion). It is the knowledge layer 
 cheapest possible form and a good test of whether the store holds enough structure.
 See [docs/design.md](docs/design.md).
 
+## `manager-api` -- One contract, and no way around it
+
+The interface the frontend and the CLI both speak. Unblocks both of them, and makes
+golite scriptable into existing workflows rather than a place work has to be done by
+hand.
+
+**Candidate approach:** plain HTTP for state changes and queries, one multiplexed SSE
+stream with typed events for everything pushed. It is the candidate because nothing in
+the management surface is bidirectional -- commands are POSTs, events are
+server-to-client -- and SSE keeps the CLI a `curl` away while reusing the SSE
+discipline the router already needs. WebSockets stays the escape hatch if something
+genuinely bidirectional appears, an interactive engine console being the plausible case.
+
+**The rule that has to hold from the first endpoint:** the manager has no internal path
+that bypasses its own API. Retrofitting it means unpicking every shortcut the UI took.
+
+Do not design the schema up front. Pick the transports, which are expensive to change,
+and let endpoints accrete against the CLI -- which is the first consumer, since the UI
+will not exist for a while. Watch for polling: it means something belongs on the event
+stream. See [docs/design.md](docs/design.md).
+
+## `frontend-foundation` -- The UI shell, before it is needed
+
+Build pipeline, the bundle served by the manager process itself, event-stream client
+plumbing, and a dev loop. Unblocks every feature not worth expressing as a command --
+which is most of what comes after the fit tiers start producing things to look at.
+
+**Candidate approach:** React (a weak preference, not a finding), bundled and served by
+the same uvicorn process -- one port, one process, no separate node server in the
+container -- with HMR against a running manager for development. Single-process serving
+is the candidate because it is what the container wants; the dev loop is called out
+because it is the difference between UI work being pleasant and being miserable.
+
+Slot it early. A CLI can carry the load for a while, but the point at which it stops
+being worth expressing that way arrives sooner than the frontend can be stood up from
+nothing. See [docs/design.md](docs/design.md).
+
 ## `auto-context` -- make concurrency an input to sizing, not an afterthought
 
 `--max-model-len auto:N` -- the largest context that leaves room for `N` concurrent

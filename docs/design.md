@@ -143,6 +143,67 @@ Two ways to get the router wrong, both of which look fine in a smoke test:
   away. A proxy that does not propagate the disconnect leaves orphaned requests
   generating on a box with no spare GPU to burn.
 
+## The API is the only surface
+
+Manager and frontend talk over one contract, and the CLI is a client of it rather than
+a parallel implementation. The discipline that makes that hold is worth stating as a
+rule, because it is cheap from the start and near-impossible to retrofit:
+
+> **The manager has no internal path that bypasses its own API.** Every action the UI
+> can take is an action the API exposes, taken the same way.
+
+Without it the UI quietly grows privileged access, the CLI can never catch up, and
+maintaining both surfaces becomes the tax it was supposed to avoid.
+
+### Two transports, split by traffic shape
+
+- **State changes and queries** -- list configurations, create one, start or stop an
+  engine, fetch a fit result -- over plain HTTP. Curl-able, scriptable, testable with
+  no client library, and a CLI over it is nearly free.
+- **Events** -- engine state, log lines, fit-loop and depth-probe progress, telemetry
+  -- over a single multiplexed SSE stream with typed events.
+
+SSE rather than WebSockets because nothing in the management surface is actually
+bidirectional: every event is server-to-client and every command is fine as a POST. SSE
+rides the same HTTP stack, reconnects on its own, and is consumable with `curl`, which
+matters given the CLI is a first-class client here. WebSockets is the more flexible
+tool and stays the escape hatch for the case that would earn it -- an interactive
+console into a running engine is the plausible one.
+
+Two constraints that are easy to miss:
+
+- **One stream, not one per subject.** Browsers cap concurrent connections per origin
+  on HTTP/1.1, and a UI watching four things would spend the budget on plumbing.
+- **The stream is also what keeps request rate low.** POST has real overhead past some
+  rate of independent commands. The way that rate stays low is that clients never poll
+  for state -- so polling appearing anywhere is a signal that something belongs on the
+  stream instead.
+
+### The CLI is a generic client, not a mirrored command surface
+
+Parity is the trap: mirroring every UI feature into a command means maintaining two
+surfaces forever. Instead, one verb that speaks the API generically -- the shape
+`gh api` has -- plus a little sugar for what gets done constantly: run a named
+configuration, import and export the store. A new feature then costs no CLI work by
+default, and a shortcut is added only once a workflow proves hot.
+
+This is consistent with the day-one import/export requirement above rather than in
+tension with it: that is a data path and a hot workflow, not a mirror of the UI.
+
+### The API's first consumer is the CLI, and that is lucky
+
+The frontend will not exist for a while, so the contract gets exercised by the client
+that is cheapest to write, and the UI arrives against an API that has already been used
+in anger. It is also why the endpoint schema should not be designed up front: pick the
+transports now, because those are expensive to change, and let the endpoints accrete.
+
+### What "frontend foundation" means beyond the framework
+
+The built bundle is served by the same uvicorn process -- one port, one process, no
+separate node server in the container -- and the dev loop is HMR against a running
+manager. Neither is a large decision, but both are the difference between UI work being
+pleasant and being miserable, and the first one shapes the container.
+
 ## Configurations are named and stored, however they were arrived at
 
 Two needs converge here, and they are the same store. **Today:** name and keep a
