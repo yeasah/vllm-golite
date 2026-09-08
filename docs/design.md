@@ -403,6 +403,30 @@ Tier 3 is the appliance verdict and the one nobody else produces. It is also
 guidellm's real job here -- not throughput numbers, but walking context depth and
 concurrency until the mid-session cliff appears.
 
+### Warm before measuring, and warm before serving
+
+The practical lesson from the capacity result is not mainly about caches, it is that
+**warmup should be applied wherever it can be**, and the measurement protocol should
+assume it has not been.
+
+- **Tier 2 does not trust a first start.** Discard it, measure the second, and require a
+  third to agree before a result is stored as certified rather than provisional. That
+  costs two extra process launches on a fresh box and nothing thereafter, which is cheap
+  against the alternative of storing a number that is 14% wrong and cannot be told apart
+  from a right one.
+- **The appliance warms on provisioning, not on first request.** A fresh container has
+  neither vLLM's compile cache nor torch's inductor cache, so the first start of a model
+  costs 74-81 s where later ones cost 24 s. That belongs to whoever set the appliance up,
+  not to whoever first asks it a question.
+
+**And the two must match, or the measurement lies.** Capacity is fixed at engine start,
+so a fit certified against a warm start does not hold for a cold one -- the cold engine
+gets the smaller cache and the certified context is simply unavailable. Warming only for
+measurement would produce exactly the failure the tiers exist to prevent: a stored number
+that was true when taken and is not true when used. So warming is a property of how the
+appliance starts engines, and the measurement protocol inherits it rather than the other
+way round.
+
 ### Traps for the config generator
 
 - **vLLM prints two `--kv-cache-memory=` suggestions, and they are not

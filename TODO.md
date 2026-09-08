@@ -167,6 +167,11 @@ engine starts small, which is what makes fitting affordable at all.
 Header-first is the candidate because it is the only tier that can answer before a
 download, and because TP divisibility is not derivable from `config.json` at all.
 
+**Warm before measuring.** A first start on a fresh box is not a measurement of the
+box: discard it, measure the second, require a third to agree before storing a result as
+certified. And warm the same way the appliance serves -- capacity is fixed at engine
+start, so a fit certified warm does not hold for a cold start.
+
 Treat tier 1's arithmetic as a *ranking* signal, never a verdict. The facts that
 decide fit -- total-vs-free, profiler failures at strictly cheaper configs, eager
 sometimes costing more than graphs -- are invisible to it by construction. See
