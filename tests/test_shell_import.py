@@ -129,3 +129,19 @@ def test_a_hub_identifier_is_left_alone(tmp_path):
 def test_an_absolute_path_stays_absolute(tmp_path):
     r = parse(write(tmp_path, "# named\nvllm serve /ckpt/qwen\n"))
     assert r.configs[0].config.model == "/ckpt/qwen"
+
+
+def test_a_relative_checkpoint_is_resolved_unverified_when_the_disk_is_not_visible(tmp_path):
+    """Parsing text that arrived over the API: the manager runs in a container and
+    cannot check whether a directory exists on the caller's machine."""
+    from vllm_untwisted.store.shell import parse_text
+    r = parse_text("# named\nvllm serve Qwen-exl3-3bpw\n", "/elsewhere/run-x.sh")
+    assert r.configs[0].config.model == "/elsewhere/Qwen-exl3-3bpw"
+    assert any("unverified" in w for w in r.warnings)
+
+
+def test_a_hub_id_is_still_left_alone_without_the_disk(tmp_path):
+    from vllm_untwisted.store.shell import parse_text
+    r = parse_text("# named\nvllm serve turboderp/gemma-4-12B-it-exl3\n", "/elsewhere/x.sh")
+    assert r.configs[0].config.model == "turboderp/gemma-4-12B-it-exl3"
+    assert not r.warnings

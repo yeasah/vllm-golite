@@ -31,7 +31,7 @@ def test_import_then_list(tmp_path, capsys):
     assert run(tmp_path, "ls") == 0
     out = capsys.readouterr().out
     assert "long-context" in out and "tight" in out
-    assert out.count("--") >= 2  # both are drafts: neither has ever started
+    assert out.count("-- ") >= 2  # both are drafts: neither has ever started
 
 
 def test_dry_run_changes_nothing(tmp_path, capsys):

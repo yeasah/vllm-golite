@@ -85,6 +85,10 @@ The interface the frontend and the CLI both speak. Unblocks both of them, and ma
 untwisted scriptable into existing workflows rather than a place work has to be done by
 hand.
 
+**A first cut exists**: config CRUD, shell import, lint, engine start/stop/status and
+a multiplexed SSE stream, with the CLI rewritten as a client of it. What remains is the
+OpenAI passthrough (see `router`), and endpoints accreting as the fit tiers need them.
+
 **Candidate approach:** plain HTTP for state changes and queries, one multiplexed SSE
 stream with typed events for everything pushed. It is the candidate because nothing in
 the management surface is bidirectional -- commands are POSTs, events are

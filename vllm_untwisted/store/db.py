@@ -25,7 +25,9 @@ only when a field is promoted, which is the point at which one is warranted anyw
 from __future__ import annotations
 
 import json
+import functools
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -82,6 +84,20 @@ KNOWN_GOOD = "known-good"
 REGRESSED = "regressed"
 
 
+def _locked(fn):
+    """Hold the store's lock for the whole call.
+
+    The API's sync handlers run in a threadpool and sqlite3 connections are thread-affine,
+    so the connection is shared with `check_same_thread=False` and serialized here. Whole
+    methods rather than statements, because several of these read and then write.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -128,15 +144,18 @@ class ConfigEntry:
 class Store:
     """A configuration store on SQLite.
 
-    Synchronous: writes are small and rare, and a manager that needs them off its event
-    loop can hand a call to a thread. Pretending otherwise would buy nothing.
+    Synchronous, and safe to call from more than one thread. One connection guarded by a
+    lock rather than a pool: the queries are small enough that serializing them costs
+    nothing worth measuring, and WAL keeps a reader from blocking a writer on disk. A
+    pool would also break `:memory:`, where each connection is a separate database.
     """
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
@@ -176,6 +195,7 @@ class Store:
 
     # -- configurations ---------------------------------------------------------
 
+    @_locked
     def add(
         self,
         config: EngineConfig,
@@ -200,6 +220,7 @@ class Store:
         self.db.commit()
         return cid
 
+    @_locked
     def get(self, ref: str) -> ConfigEntry | None:
         """Look up by id or by name. Ids win, so a name shaped like an id cannot shadow."""
         row = self.db.execute("SELECT * FROM configs WHERE id = ?", (ref,)).fetchone()
@@ -207,10 +228,12 @@ class Store:
             row = self.db.execute("SELECT * FROM configs WHERE name = ?", (ref,)).fetchone()
         return None if row is None else self._entry(row)
 
+    @_locked
     def list(self) -> list[ConfigEntry]:
         rows = self.db.execute("SELECT * FROM configs ORDER BY name").fetchall()
         return [self._entry(r) for r in rows]
 
+    @_locked
     def rename(self, ref: str, new_name: str) -> None:
         """The reason identity is not the name."""
         entry = self._require(ref)
@@ -221,6 +244,7 @@ class Store:
             raise ValueError(f"a configuration named {new_name!r} already exists") from exc
         self.db.commit()
 
+    @_locked
     def update(self, ref: str, config: EngineConfig) -> None:
         """Replace the invocation. Runs already recorded stay attached, and stay true of
         what they measured -- which is why they carry their own fingerprint."""
@@ -231,6 +255,7 @@ class Store:
         )
         self.db.commit()
 
+    @_locked
     def delete(self, ref: str) -> None:
         entry = self._require(ref)
         self.db.execute("DELETE FROM configs WHERE id = ?", (entry.id,))
@@ -238,6 +263,7 @@ class Store:
 
     # -- runs -------------------------------------------------------------------
 
+    @_locked
     def record_run(
         self,
         ref: str,
@@ -263,6 +289,7 @@ class Store:
         self.db.commit()
         return rid
 
+    @_locked
     def close_run(
         self,
         run_id: str,
@@ -281,6 +308,7 @@ class Store:
             " WHERE id = ?", (outcome, failure_kind, failure_summary, run_id))
         self.db.commit()
 
+    @_locked
     def runs(self, ref: str, limit: int = 50) -> list[RunRecord]:
         entry = self._require(ref)
         rows = self.db.execute(

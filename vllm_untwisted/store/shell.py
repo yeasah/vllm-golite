@@ -86,22 +86,53 @@ def _resolve_model(model: str, path: Path, lineno: int, result: ImportResult) ->
     name that resolved for `sh` resolves to nothing here -- and vLLM's failure for that
     is indistinguishable from a checkpoint that was never downloaded.
 
-    The test is whether a directory of that name sits beside the script. That separates
-    `Qwen3.8-27B-exl3-3.00bpw-bq`, which is a folder, from `turboderp/gemma-4-12B-it-exl3`,
-    which is a repository on the hub and must stay as written.
+    Two ways to tell a local folder from a repository on the hub, used in order:
+
+    1. Is a directory of that name actually beside the script? Decisive, and available
+       when the script is being read off a local disk.
+    2. Failing that, does the name contain a `/`? A hub id is always `owner/name`, and
+       these checkpoint folders are not nested. Used when the script arrived as text
+       over the API, where the manager -- in a container -- cannot see the caller's
+       filesystem to check. The resolution is then recorded as unverified, because a
+       relative *subdirectory* would be misread by this rule.
     """
     if model.startswith(("/", "~", "./", "../")):
         return _expand(model, path, lineno, result)
+
     candidate = path.parent / model
     if candidate.is_dir():
         result.warnings.append(
             f"{path.name}:{lineno}: resolved `{model}` to `{candidate}`; it is relative "
             f"to the script and a stored configuration has no working directory.")
         return str(candidate)
+
+    if "/" in model:
+        return model  # owner/name: a repository on the hub
+
+    if path.parent != Path("."):
+        result.warnings.append(
+            f"{path.name}:{lineno}: resolved `{model}` to `{candidate}` **unverified** "
+            f"-- no such directory is visible from here. Check it before running.")
+        return str(candidate)
+
+    result.warnings.append(
+        f"{path.name}:{lineno}: `{model}` looks like a local checkpoint but there is "
+        f"nothing to resolve it against. It will fail to load unless made absolute.")
     return model
 
 
 def parse(path: str | Path) -> ImportResult:
+    path = Path(path)
+    return parse_text(path.read_text(), path)
+
+
+def parse_text(text: str, path: str | Path) -> ImportResult:
+    """Parse already-read script text.
+
+    Split out from `parse` because the API takes contents rather than a path: the manager
+    runs in a container and cannot open the caller's files, while parsing must stay in
+    one place so the CLI and the frontend cannot disagree about what a script means.
+    """
     path = Path(path)
     result = ImportResult()
     banner = ""
@@ -110,7 +141,7 @@ def parse(path: str | Path) -> ImportResult:
     exported: dict[str, str] = {}
     seen: set[str] = set()
 
-    for lineno, raw in enumerate(path.read_text().splitlines(), 1):
+    for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#!"):
             continue
