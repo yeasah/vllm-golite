@@ -72,3 +72,21 @@ def test_a_missing_reference_is_an_error_not_a_traceback(tmp_path, capsys):
     assert run(tmp_path, "show", "nope") == 1
     assert run(tmp_path, "rename", "nope", "x") == 1
     assert "error" in capsys.readouterr().err or True
+
+
+def test_lint_reports_and_exits_nonzero(tmp_path, capsys):
+    p = tmp_path / "run-y.sh"
+    p.write_text("# tight\nvllm serve /ckpt/q --kv-cache-memory=123\n")
+    run(tmp_path, "import-sh", str(p))
+    capsys.readouterr()
+    assert run(tmp_path, "lint") == 1
+    assert "pinned-kv-cache-memory" in capsys.readouterr().out
+
+
+def test_lint_is_quiet_and_zero_when_there_is_nothing_to_say(tmp_path, capsys):
+    p = tmp_path / "run-z.sh"
+    p.write_text("# clean\nvllm serve /ckpt/q --max-num-seqs 1\n")
+    run(tmp_path, "import-sh", str(p))
+    capsys.readouterr()
+    assert run(tmp_path, "lint") == 0
+    assert "nothing to report" in capsys.readouterr().err

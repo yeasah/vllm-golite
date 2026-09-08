@@ -73,12 +73,11 @@ when, against which box fingerprint and fork/plugin versions) so staleness is
 mechanical rather than remembered; and **an entry that has never launched is a
 draft**, which is most of the cure for the rot.
 
-Then `config-lint`: the documented traps are statically checkable against a stored
-entry with no GPU and no engine start (`--max-model-len auto` with `--max-num-seqs >
-1`, `--gpu-memory-utilization` above the box's free/total ratio, a `--kv-cache-memory`
-pin inherited from vLLM's own low-biased suggestion). It is the knowledge layer in its
-cheapest possible form and a good test of whether the store holds enough structure.
-See [docs/design.md](docs/design.md).
+`config-lint` exists, with two rules rather than a catalogue -- enough to show the
+mechanism carries both a rule reading the invocation alone and one reading it against
+what previous runs reported. Rules get added when a trap costs someone something.
+On the 21 configurations imported from `~/ckpt`, it flags 13, and none of the three the
+user had marked verified. See [docs/design.md](docs/design.md).
 
 ## `manager-api` -- One contract, and no way around it
 

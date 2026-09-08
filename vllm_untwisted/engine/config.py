@@ -58,6 +58,23 @@ class EngineConfig:
                    env=dict(doc.get("env", {})),
                    launcher=tuple(doc.get("launcher", ("vllm", "serve"))))
 
+    def flag(self, name: str) -> str | None:
+        """The value of `--name`, however it was written.
+
+        Both syntaxes appear in the same script (`--kv-cache-memory=N` beside
+        `--gpu-memory-utilization 0.97`), so anything reading a flag has to accept both.
+        Returns "" for a flag present without a value, and None when absent -- which
+        distinguishes `--enable-prefix-caching` from a flag that is not there.
+        """
+        opt = "--" + name.replace("_", "-")
+        for i, arg in enumerate(self.args):
+            if arg == opt:
+                nxt = self.args[i + 1] if i + 1 < len(self.args) else None
+                return "" if nxt is None or nxt.startswith("-") else nxt
+            if arg.startswith(opt + "="):
+                return arg.split("=", 1)[1]
+        return None
+
     def with_args(self, **flags: str | None) -> EngineConfig:
         """Return a copy with `--flag value` set or removed.
 

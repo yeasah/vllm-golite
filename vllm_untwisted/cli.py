@@ -131,6 +131,27 @@ def cmd_show(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lint(store: Store, args: argparse.Namespace) -> int:
+    from vllm_untwisted.store.lint import lint
+
+    entries = [store.get(args.ref)] if args.ref else store.list()
+    if entries == [None]:
+        print(f"no configuration {args.ref!r}", file=sys.stderr)
+        return 1
+    found = 0
+    for entry in entries:
+        findings = lint(entry)
+        if not findings:
+            continue
+        found += sum(f.severity == "warn" for f in findings)
+        print(entry.name)
+        for f in findings:
+            print(f"  {f.severity}  {f.rule}: {f.message}")
+    if not found:
+        print("nothing to report", file=sys.stderr)
+    return 1 if found else 0
+
+
 def cmd_export(store: Store, args: argparse.Namespace) -> int:
     entries = [store.get(args.ref)] if args.ref else store.list()
     if entries == [None]:
@@ -189,6 +210,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("ref", help="name or id")
     p.add_argument("--runs", type=int, default=5)
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("lint", help="check configurations against known traps")
+    p.add_argument("ref", nargs="?")
+    p.set_defaults(func=cmd_lint)
 
     p = sub.add_parser("export", help="write configurations as JSON")
     p.add_argument("ref", nargs="?")
