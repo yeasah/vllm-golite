@@ -120,3 +120,43 @@ def test_the_invocation_round_trips(store):
 def test_unknown_reference_raises(store):
     with pytest.raises(KeyError):
         store.record_run("nope", outcome="ready")
+
+
+def test_how_a_run_ended_is_not_whether_it_ever_served(store):
+    """The bug this separation exists for: a normal lifecycle ends `stopped`, so
+    deriving "has this ever worked" from the outcome made every configuration revert to
+    a draft the moment its engine was shut down cleanly."""
+    cid = store.add(cfg("c"))
+    rid = store.record_run(cid, outcome="ready")
+    store.close_run(rid, outcome="stopped")
+
+    entry = store.get(cid)
+    assert entry.status == KNOWN_GOOD
+    assert entry.last_run.outcome == "stopped"
+    assert entry.last_run.became_ready
+
+
+def test_an_engine_that_died_after_serving_is_not_a_failed_start(store):
+    cid = store.add(cfg("c"))
+    rid = store.record_run(cid, outcome="ready")
+    store.close_run(rid, outcome="died", failure_kind="died_while_ready")
+
+    entry = store.get(cid)
+    assert entry.status == KNOWN_GOOD  # it did start; the death is a different fact
+    assert entry.last_run.outcome == "died"
+    assert entry.last_run.failure_kind == "died_while_ready"
+
+
+def test_an_older_store_is_refused_rather_than_misread(tmp_path):
+    import sqlite3
+
+    import pytest
+
+    from vllm_untwisted.store.db import Store as S
+    path = tmp_path / "old.db"
+    with S(path):
+        pass
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+    with pytest.raises(RuntimeError, match="schema v1"):
+        S(path)

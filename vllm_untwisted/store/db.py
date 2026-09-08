@@ -34,7 +34,7 @@ from pathlib import Path
 
 from vllm_untwisted.engine.config import EngineConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS runs (
     failure_summary TEXT,
     startup_seconds REAL,
     compile_state   TEXT,
+    -- Whether the start ever became healthy, kept apart from `outcome`, which says how
+    -- the run *ended*. Deriving "has this ever worked" from the outcome would make a
+    -- clean stop indistinguishable from a start that never came up: a normal lifecycle
+    -- ends `stopped`, and every configuration would revert to a draft on shutdown.
+    became_ready    INTEGER NOT NULL DEFAULT 0,
     facts           TEXT NOT NULL,
     fingerprint     TEXT NOT NULL
 );
@@ -91,6 +96,8 @@ class RunRecord:
     failure_summary: str | None
     startup_seconds: float | None
     compile_state: str | None
+    #: The start reached a healthy engine, whatever happened to it afterwards.
+    became_ready: bool
     facts: dict[str, str]
     #: What the run happened on -- box and software versions. Opaque here on purpose:
     #: which fields belong in it is a fit question, and putting the policy in the schema
@@ -135,12 +142,28 @@ class Store:
         if self.path != ":memory:":
             # Survive a crash mid-write, which is the whole reason this is not a file.
             self.db.execute("PRAGMA journal_mode = WAL")
+        existing = self.db.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone() if self._has_meta() else None
+        if existing is not None and int(existing["value"]) != SCHEMA_VERSION:
+            # Nothing is shipped yet, so there is no migration path and pretending
+            # otherwise would corrupt quietly. Say so instead.
+            raise RuntimeError(
+                f"{self.path} uses store schema v{existing['value']}, this build expects "
+                f"v{SCHEMA_VERSION}. No migration exists yet -- move it aside and "
+                f"re-import."
+            )
         self.db.executescript(SCHEMA)
         self.db.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         self.db.commit()
+
+    def _has_meta(self) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone() is not None
 
     def close(self) -> None:
         self.db.close()
@@ -231,14 +254,32 @@ class Store:
         rid = uuid.uuid4().hex[:12]
         self.db.execute(
             "INSERT INTO runs (id, config_id, started_at, outcome, failure_kind,"
-            " failure_summary, startup_seconds, compile_state, facts, fingerprint)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " failure_summary, startup_seconds, compile_state, became_ready, facts,"
+            " fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (rid, entry.id, _now(), outcome, failure_kind, failure_summary,
-             startup_seconds, compile_state, json.dumps(facts or {}),
-             json.dumps(fingerprint or {})),
+             startup_seconds, compile_state, int(outcome == "ready"),
+             json.dumps(facts or {}), json.dumps(fingerprint or {})),
         )
         self.db.commit()
         return rid
+
+    def close_run(
+        self,
+        run_id: str,
+        *,
+        outcome: str,
+        failure_kind: str | None = None,
+        failure_summary: str | None = None,
+    ) -> None:
+        """Revise a run's outcome once the engine is gone.
+
+        A start that succeeded and an engine that then died are one run, not two: the
+        alternative double-counts every start and makes "has this ever worked" wrong.
+        """
+        self.db.execute(
+            "UPDATE runs SET outcome = ?, failure_kind = ?, failure_summary = ?"
+            " WHERE id = ?", (outcome, failure_kind, failure_summary, run_id))
+        self.db.commit()
 
     def runs(self, ref: str, limit: int = 50) -> list[RunRecord]:
         entry = self._require(ref)
@@ -260,12 +301,13 @@ class Store:
             "SELECT * FROM runs WHERE config_id = ? ORDER BY started_at DESC, rowid DESC"
             " LIMIT 1", (row["id"],)).fetchone()
         total = self.db.execute(
-            "SELECT COUNT(*) c, SUM(outcome = 'ready') ok FROM runs WHERE config_id = ?",
+            "SELECT COUNT(*) c, SUM(became_ready) ok FROM runs WHERE config_id = ?",
             (row["id"],)).fetchone()
-        ever_ready = (total["ok"] or 0) > 0
-        if not ever_ready:
+        if (total["ok"] or 0) == 0:
             status = DRAFT
-        elif last is not None and last["outcome"] != "ready":
+        elif last is not None and not last["became_ready"]:
+            # The latest *start* failed. An engine that served and later died is not
+            # regressed by this rule -- its run says `died`, which is a different fact.
             status = REGRESSED
         else:
             status = KNOWN_GOOD
@@ -286,6 +328,7 @@ class Store:
             outcome=row["outcome"], failure_kind=row["failure_kind"],
             failure_summary=row["failure_summary"],
             startup_seconds=row["startup_seconds"], compile_state=row["compile_state"],
+            became_ready=bool(row["became_ready"]),
             facts=json.loads(row["facts"]), fingerprint=json.loads(row["fingerprint"]),
         )
 

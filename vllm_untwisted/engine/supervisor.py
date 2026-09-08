@@ -87,6 +87,12 @@ class Supervisor:
     def state(self) -> EngineState:
         return self.record.state if self.record else EngineState.STOPPED
 
+    @property
+    def compile_state(self) -> str:
+        """Which compile-cache state this start was in -- part of a run's provenance,
+        because it is upstream of how much compiling contaminated the profiling run."""
+        return self._scanner.compile_state
+
     def log_tail(self, n: int = 50) -> tuple[str, ...]:
         return tuple(self._log)[-n:]
 

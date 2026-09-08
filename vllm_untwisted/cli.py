@@ -18,6 +18,7 @@ import os
 import sys
 from pathlib import Path
 
+from vllm_untwisted.engine import EngineState, Supervisor
 from vllm_untwisted.engine.config import EngineConfig
 from vllm_untwisted.store import Store
 from vllm_untwisted.store.shell import parse
@@ -51,6 +52,46 @@ def cmd_import_sh(store: Store, args: argparse.Namespace) -> int:
     print(f"{total} configuration(s){' (dry run)' if args.dry_run else ''}",
           file=sys.stderr)
     return 0
+
+
+def cmd_run(store: Store, args: argparse.Namespace) -> int:
+    """What replaces `sh run-whatever.sh`."""
+    import asyncio
+    import contextlib
+
+    from vllm_untwisted.manager import Manager
+
+    async def go() -> int:
+        manager = Manager(store, Supervisor(start_timeout=args.timeout))
+        started = await manager.start(args.ref)
+        record = started.record
+
+        if not started.ok:
+            failure = record.failure
+            print(f"failed: {failure.kind} -- {failure.summary}", file=sys.stderr)
+            for line in failure.log_tail[-15:]:
+                print(f"  {line}", file=sys.stderr)
+            await manager.stop()
+            return 1
+
+        print(f"ready on port {record.port} in {record.startup_seconds:.1f}s "
+              f"(compile cache: {manager.supervisor.compile_state})")
+        for reclaimed in record.reclaimed_shm:
+            print(f"reclaimed abandoned shared memory: {reclaimed}", file=sys.stderr)
+        for key in ("available_kv_cache_gib", "kv_cache_size_tokens",
+                    "maximum_concurrency", "peak_activation_gib"):
+            if key in record.facts:
+                print(f"  {key:<26} {record.facts[key]}")
+
+        if not args.once:
+            print("\nserving; ctrl-c to stop", file=sys.stderr)
+            with contextlib.suppress(KeyboardInterrupt):
+                while manager.supervisor.state is EngineState.READY:
+                    await asyncio.sleep(0.5)
+        await manager.stop()
+        return 0
+
+    return asyncio.run(go())
 
 
 def cmd_ls(store: Store, args: argparse.Namespace) -> int:
@@ -133,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("files", nargs="+")
     p.add_argument("-n", "--dry-run", action="store_true")
     p.set_defaults(func=cmd_import_sh)
+
+    p = sub.add_parser("run", help="start a stored configuration")
+    p.add_argument("ref", help="name or id")
+    p.add_argument("--once", action="store_true",
+                   help="stop as soon as it is healthy (a warmup or measurement pass)")
+    p.add_argument("--timeout", type=float, default=900.0)
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("ls", help="list configurations")
     p.set_defaults(func=cmd_ls)

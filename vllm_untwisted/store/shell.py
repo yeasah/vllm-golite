@@ -78,6 +78,29 @@ def _expand(value: str, path: Path, lineno: int, result: ImportResult) -> str:
     return value
 
 
+def _resolve_model(model: str, path: Path, lineno: int, result: ImportResult) -> str:
+    """Make a local checkpoint absolute; leave a hub id alone.
+
+    The scripts name checkpoints relatively because they are run from the directory the
+    checkpoints live in. A stored configuration has no working directory, so a relative
+    name that resolved for `sh` resolves to nothing here -- and vLLM's failure for that
+    is indistinguishable from a checkpoint that was never downloaded.
+
+    The test is whether a directory of that name sits beside the script. That separates
+    `Qwen3.8-27B-exl3-3.00bpw-bq`, which is a folder, from `turboderp/gemma-4-12B-it-exl3`,
+    which is a repository on the hub and must stay as written.
+    """
+    if model.startswith(("/", "~", "./", "../")):
+        return _expand(model, path, lineno, result)
+    candidate = path.parent / model
+    if candidate.is_dir():
+        result.warnings.append(
+            f"{path.name}:{lineno}: resolved `{model}` to `{candidate}`; it is relative "
+            f"to the script and a stored configuration has no working directory.")
+        return str(candidate)
+    return model
+
+
 def parse(path: str | Path) -> ImportResult:
     path = Path(path)
     result = ImportResult()
@@ -153,7 +176,8 @@ def parse(path: str | Path) -> ImportResult:
             result.warnings.append(f"{path.name}:{lineno}: no model argument")
             continue
 
-        model, args = rest[2], [_expand(a, path, lineno, result) for a in rest[3:]]
+        model = _resolve_model(rest[2], path, lineno, result)
+        args = [_expand(a, path, lineno, result) for a in rest[3:]]
         env = {**exported, **env}  # a prefix on the command line wins
 
         # --port belongs to the supervisor: a stored config that pins one cannot run twice.

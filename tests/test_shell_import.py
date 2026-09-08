@@ -108,3 +108,24 @@ def test_names_stay_unique_within_a_file(tmp_path):
 def test_an_unnamed_invocation_falls_back_to_the_file(tmp_path):
     r = parse(write(tmp_path, "vllm serve /ckpt/q\n", name="run-solo.sh"))
     assert r.configs[0].config.name.startswith("run-solo")
+
+
+def test_a_local_checkpoint_beside_the_script_is_made_absolute(tmp_path):
+    """The scripts name checkpoints relatively because sh runs them from that directory.
+    A stored configuration has no working directory, and vLLM's error for a relative path
+    that resolves to nothing is indistinguishable from a checkpoint never downloaded."""
+    (tmp_path / "Qwen-exl3-3bpw").mkdir()
+    r = parse(write(tmp_path, "# named\nvllm serve Qwen-exl3-3bpw --max-num-seqs 1\n"))
+    assert r.configs[0].config.model == str(tmp_path / "Qwen-exl3-3bpw")
+    assert any("relative to the script" in w for w in r.warnings)
+
+
+def test_a_hub_identifier_is_left_alone(tmp_path):
+    r = parse(write(tmp_path, "# named\nvllm serve turboderp/gemma-4-12B-it-exl3\n"))
+    assert r.configs[0].config.model == "turboderp/gemma-4-12B-it-exl3"
+    assert not r.warnings
+
+
+def test_an_absolute_path_stays_absolute(tmp_path):
+    r = parse(write(tmp_path, "# named\nvllm serve /ckpt/qwen\n"))
+    assert r.configs[0].config.model == "/ckpt/qwen"
