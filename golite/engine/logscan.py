@@ -1,86 +1,125 @@
 """Read vLLM's startup log for two things: why it failed, and what it measured.
 
 The failure half is not optional. vLLM reports its interesting failures rather than
-raising them, so a supervisor watching only the exit code learns almost nothing about
-an OOM at profile time versus a checkpoint that was never there.
+raising them, so an exit code alone cannot separate an OOM at profile time from a
+checkpoint that was never there. It also logs `[ERROR]` for things that are not errors
+at all -- undocumented processor kwargs, absent ROCm modules -- so classification has to
+be specific patterns rather than a search for the word.
 
-The measurement half is the more valuable one and is easy to miss. An engine start
-costs a whole process launch, and while it starts, vLLM prints numbers that no amount
-of `config.json` arithmetic can produce -- free versus total memory, the KV cache it
-actually got, what it thinks concurrency will be. Harvesting those turns every launch
-into a tier-2 measurement instead of only a launch.
+The measurement half is the more valuable one and easy to miss. An engine start costs a
+whole process launch, and while it starts vLLM prints numbers no amount of `config.json`
+arithmetic can produce: free versus total memory, where the memory actually went, the
+KV cache it got, and how long each phase took. Harvesting those makes every launch a
+tier-2 measurement instead of only a launch.
 
-**Patterns here are provisional.** They are written from the strings this project has
-recorded seeing, not from a survey of vLLM's logging, and vLLM's log text is not an API.
-Each carries its provenance, and `python -m golite.engine.logscan <logfile>` prints what
-matched and what did not so a real capture can settle them. Treat an unverified pattern
-that never fires as unverified, not as an absent condition.
+Patterns carry their provenance. Most are now `attested` against a real capture
+(Qwen3.8-27B EXL3 3.00bpw, turboquant KV, fork v0.28.0, 2026-09-07) kept as
+`tests/data/`. vLLM's log text is not an API, so `python -m golite.calibrate <log>`
+re-checks the table against any capture and reports what stopped matching.
 """
 
 from __future__ import annotations
 
 import re
-import sys
 from dataclasses import dataclass
 
 from golite.engine.state import FailureKind
 
+ATTESTED = "attested"   # matched against a real capture kept in tests/data/
+LIKELY = "likely"       # standard library or framework text, not seen here
+GUESSED = "guessed"     # plausible shape, never checked
+
 
 @dataclass(frozen=True, slots=True)
 class Pattern:
-    key: str
+    #: One key per capture group, in order.
+    keys: tuple[str, ...]
     regex: re.Pattern[str]
-    #: How much we actually know about this string.
-    #: "attested"  -- quoted in this project's own field notes, from a real run.
-    #: "likely"    -- standard library/framework text (a Python exception, an OSError).
-    #: "guessed"   -- plausible shape, never checked. Calibrate before relying on it.
     provenance: str
 
 
-#: Numbers vLLM prints while starting. Keys are ours and stable; the regexes are not.
+def _p(keys: str, pattern: str, provenance: str = ATTESTED) -> Pattern:
+    return Pattern(tuple(keys.split()), re.compile(pattern), provenance)
+
+
+#: The startup summary. One line carries most of the memory story, which is why several
+#: patterns read the same sentence:
+#:
+#:   Free memory on device (15.28/15.51 GiB) on startup. Desired GPU memory utilization
+#:   is (0.92, 14.27 GiB). Actual usage is 10.47 GiB for consumed memory (weights +
+#:   non-torch), 0.79 GiB for peak activation, and 0.04 GiB for CUDAGraph memory.
+#:   Replace gpu_memory_utilization config with `--kv-cache-memory=3031561913` (2.82
+#:   GiB) to fit into requested memory, or `--kv-cache-memory=4121221120` (3.84 GiB) to
+#:   fully utilize gpu memory. Current kv cache memory in use is 3.01 GiB.
 FACTS: tuple[Pattern, ...] = (
-    # Attested in the field notes: "the startup line prints both, so the maximum usable
-    # value is literally their ratio -- 15.28 / 15.51 = 0.985". Format unconfirmed.
-    Pattern("memory_free_total",
-            re.compile(r"([\d.]+)\s*GiB\s*(?:is\s*)?free.*?([\d.]+)\s*GiB.*?total", re.I),
-            "guessed"),
-    # Attested verbatim in the field notes, including the trailing "x".
-    Pattern("maximum_concurrency",
-            # Lazy, not [^\d]*: the real line puts the request size between the label
-            # and the value -- "Maximum concurrency for 262,144 tokens per request: 1.03x".
-            re.compile(r"Maximum concurrency.*?([\d.]+)x", re.I),
-            "attested"),
-    # Attested: vLLM prints a `--kv-cache-memory=` line. Do not apply it blindly --
-    # it subtracts graph memory and a 150 MiB redundancy buffer the profiler did not
-    # count, so it lands below what the running engine is already surviving on.
-    Pattern("kv_cache_memory_suggestion",
-            re.compile(r"--kv-cache-memory=(\d+)"),
-            "attested"),
-    Pattern("kv_cache_size_tokens",
-            re.compile(r"KV cache size[^\d]*([\d,]+)\s*tokens", re.I),
-            "guessed"),
-    # Attested that the capture cost is "reported directly at startup"; wording unknown.
-    Pattern("graph_capture_memory",
-            re.compile(r"[Gg]raph capturing finished.*?([\d.]+)\s*GiB", re.I),
-            "guessed"),
+    # The ceiling on --gpu-memory-utilization is the ratio of these two: a fraction of
+    # *total* that must fit within *free*. The gap is driver and context overhead.
+    _p("memory_free_gib memory_total_gib",
+       r"Free memory on device \(([\d.]+)/([\d.]+)\s*GiB\)"),
+    _p("gpu_memory_utilization gpu_memory_budget_gib",
+       r"Desired GPU memory utilization is \(([\d.]+),\s*([\d.]+)\s*GiB\)"),
+    _p("consumed_memory_gib", r"Actual usage is ([\d.]+)\s*GiB for consumed memory"),
+    # The transient the profiler *does* see. It does not vary with cached context, which
+    # is why a config can pass here and still OOM mid-session.
+    _p("peak_activation_gib", r"([\d.]+)\s*GiB for peak activation"),
+    _p("cudagraph_memory_gib", r"([\d.]+)\s*GiB for CUDAGraph memory"),
+    # Two suggestions, not one, and they bracket what is actually running. Neither is
+    # safe to apply blindly -- see docs/design.md.
+    _p("kv_cache_memory_requested kv_cache_requested_gib",
+       r"--kv-cache-memory=(\d+)`?\s*\(([\d.]+)\s*GiB\) to fit into requested"),
+    _p("kv_cache_memory_full kv_cache_full_gib",
+       r"--kv-cache-memory=(\d+)`?\s*\(([\d.]+)\s*GiB\) to fully utilize"),
+    _p("kv_cache_in_use_gib", r"Current kv cache memory in use is ([\d.]+)\s*GiB"),
+
+    _p("available_kv_cache_gib", r"Available KV cache memory:\s*([\d.]+)\s*GiB"),
+    _p("kv_cache_size_tokens", r"GPU KV cache size:\s*([\d,]+)\s*tokens"),
+    # Lazy, not [^\d]*: the label and value are separated by the request size --
+    # "Maximum concurrency for 172,032 tokens per request: 1.00x".
+    _p("maximum_concurrency", r"Maximum concurrency.*?([\d.]+)x"),
+    # `--max-model-len auto` in action. When this fires, max_model_len was set *to* the
+    # KV capacity, which makes a reported concurrency of 1.00x a tautology.
+    _p("auto_fit_from auto_fit_to",
+       r"Auto-fit max_model_len: reduced from (\d+) to (\d+)"),
+    # Hybrid models force a large attention block so the mamba page size matches. This
+    # is the floor on granularity for anything that works in blocks.
+    _p("attention_block_size", r"Setting attention block size to (\d+)\s*tokens"),
+
+    # Phase timings. Startup cost is the appliance's dominant UX cost with one engine,
+    # and vLLM already breaks it down -- no instrumentation needed, just reading.
+    _p("weights_gib weight_load_seconds",
+       r"Model loading took ([\d.]+)\s*GiB memory and ([\d.]+)\s*seconds"),
+    _p("dynamo_seconds", r"Dynamo bytecode transform time:\s*([\d.]+)\s*s"),
+    _p("compile_warmup_seconds",
+       r"torch\.compile and initial profiling/warmup run together took ([\d.]+)\s*s"),
+    _p("init_engine_seconds compilation_seconds",
+       r"init engine .*?took ([\d.]+)\s*s \(compilation: ([\d.]+)\s*s\)"),
+    _p("graph_capture_seconds graph_capture_gib",
+       r"Graph capturing finished in (\d+)\s*secs, took ([\d.]+)\s*GiB"),
+    _p("checkpoint_gib", r"Checkpoint size:\s*([\d.]+)\s*GiB"),
+)
+
+#: Conditions worth knowing about that are not numbers.
+FLAGS: tuple[Pattern, ...] = (
+    # Compilation dominates a cold start, so this decides most of the startup cost.
+    _p("compile_cache_disabled", r"(vLLM's torch\.compile cache is disabled)"),
 )
 
 #: Failure signatures, most specific first -- the first match wins.
 FAILURES: tuple[tuple[Pattern, FailureKind], ...] = (
-    (Pattern("cuda_oom", re.compile(r"torch\.(cuda\.)?OutOfMemoryError|CUDA out of memory", re.I),
-             "likely"), FailureKind.OOM),
-    (Pattern("no_kv_cache", re.compile(r"No available memory for the cache blocks|"
-                                       r"initial engine.*?memory.*?not enough", re.I),
-             "guessed"), FailureKind.NO_KV_CACHE),
-    (Pattern("port_in_use", re.compile(r"[Aa]ddress already in use|EADDRINUSE"),
-             "likely"), FailureKind.PORT_IN_USE),
-    (Pattern("model_not_found",
-             re.compile(r"RepositoryNotFoundError|does not appear to have a file named|"
-                        r"No such file or directory.*?config\.json", re.I),
-             "likely"), FailureKind.MODEL_NOT_FOUND),
+    (_p("cuda_oom", r"torch\.(?:cuda\.)?OutOfMemoryError|CUDA out of memory", LIKELY),
+     FailureKind.OOM),
+    (_p("no_kv_cache", r"No available memory for the cache blocks|"
+        r"to serve at least one request", GUESSED), FailureKind.NO_KV_CACHE),
+    (_p("port_in_use", r"[Aa]ddress already in use|EADDRINUSE", LIKELY),
+     FailureKind.PORT_IN_USE),
+    (_p("model_not_found",
+        r"RepositoryNotFoundError|does not appear to have a file named|"
+        r"No such file or directory.*?config\.json", LIKELY), FailureKind.MODEL_NOT_FOUND),
 )
 
-#: Lines worth showing a human even when nothing classified them.
+#: For calibration only. Deliberately broad, and deliberately not a classifier: vLLM
+#: emits [ERROR] for benign things, so this exists to show a human what a table did not
+#: claim, never to decide that a start failed.
 INTERESTING = re.compile(r"error|traceback|exception|fail|out of memory", re.I)
 
 
@@ -91,53 +130,16 @@ class LogScanner:
         self.facts: dict[str, str] = {}
         self.failure_kind: FailureKind | None = None
         self.failure_line: str | None = None
-        self.matched_keys: set[str] = set()
 
     def feed(self, line: str) -> None:
-        for pat in FACTS:
-            if pat.key in self.facts:
+        for pat in (*FACTS, *FLAGS):
+            if pat.keys[0] in self.facts:
                 continue  # first occurrence wins; a restart makes a new scanner
             if m := pat.regex.search(line):
-                self.facts[pat.key] = m.group(1) if m.lastindex == 1 else "/".join(m.groups())
-                self.matched_keys.add(pat.key)
+                for key, value in zip(pat.keys, m.groups(), strict=False):
+                    self.facts[key] = value
         if self.failure_kind is None:
             for pat, kind in FAILURES:
                 if pat.regex.search(line):
                     self.failure_kind, self.failure_line = kind, line.strip()
-                    self.matched_keys.add(pat.key)
                     break
-
-
-def _calibrate(path: str) -> int:
-    """Run the pattern table over a captured log and report what it can and cannot see.
-
-    This is the loop that turns the guesses above into attested patterns, and the reason
-    the table is data rather than inline regexes.
-    """
-    scanner = LogScanner()
-    unclassified: list[str] = []
-    with open(path, errors="replace") as fh:
-        for line in fh:
-            scanner.feed(line)
-            if INTERESTING.search(line) and scanner.failure_line != line.strip():
-                unclassified.append(line.rstrip())
-
-    print(f"== facts ({len(scanner.facts)}/{len(FACTS)} patterns fired)")
-    for pat in FACTS:
-        got = scanner.facts.get(pat.key)
-        mark = "  " if got else "!!"
-        print(f"{mark} {pat.key:<28} [{pat.provenance:<8}] {got if got else '-- no match'}")
-    print(f"\n== failure: {scanner.failure_kind or 'none classified'}")
-    if scanner.failure_line:
-        print(f"   {scanner.failure_line}")
-    if unclassified:
-        print(f"\n== {len(unclassified)} interesting lines nothing claimed")
-        for line in unclassified[:40]:
-            print(f"   {line}")
-    return 0
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python -m golite.engine.logscan <vllm-log-file>")
-    sys.exit(_calibrate(sys.argv[1]))

@@ -43,8 +43,9 @@ async def test_starts_and_reports_ready(sup):
 
 async def test_ready_engine_carries_what_the_start_measured(sup):
     async with running(cfg(), supervisor=sup) as s:
-        assert s.record.facts["maximum_concurrency"] == "1.03"
-        assert s.record.facts["kv_cache_memory_suggestion"] == "1323302912"
+        assert s.record.facts["maximum_concurrency"] == "1.00"
+        assert s.record.facts["kv_cache_memory_requested"] == "3031561913"
+        assert s.record.facts["peak_activation_gib"] == "0.79"
 
 
 async def test_oom_is_classified_not_just_an_exit_code(sup):
@@ -60,7 +61,7 @@ async def test_unclassified_exit_still_reports_the_code_and_the_tail(sup):
     await sup.start(cfg("--exit-before-ready", "3"))
     assert sup.record.failure.kind is FailureKind.EXIT_BEFORE_READY
     assert sup.record.failure.exit_code == 3
-    assert any("starting engine" in line for line in sup.record.failure.log_tail)
+    assert any("Model loading took" in line for line in sup.record.failure.log_tail)
     await sup.stop()
 
 

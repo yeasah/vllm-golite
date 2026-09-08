@@ -113,13 +113,41 @@ class SubprocessHandle:
                 pass
 
 
+#: Namespaces the engine stack reads as *configuration*. Anything here that golite did
+#: not put there is ambient state leaking into a run, so it is dropped unless the
+#: configuration asks for it.
+#:
+#: This is not hypothetical. The first real capture through this supervisor inherited
+#: `VLLM_DISABLE_COMPILE_CACHE=1` from the developer's shell and paid 50 s of
+#: compilation that the config it was reproducing does not pay -- the shell script being
+#: replaced starts with `unset VLLM_DISABLE_COMPILE_CACHE` for exactly this reason.
+#: In the shipped image the base set is controlled and this filter should find nothing;
+#: on a development box it is the difference between a measurement and a coincidence.
+TUNING_PREFIXES = (
+    "VLLM_", "EXL3_", "PYTORCH_", "TORCH_", "TRITON_", "CUDA_", "NCCL_", "TORCHINDUCTOR_",
+)
+
+
+def declared_env(ambient: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
+    """Ambient environment with engine-tuning variables removed.
+
+    Returns the base and the names dropped, because a silently filtered environment is
+    its own kind of surprise -- the supervisor reports what it took away.
+    """
+    ambient = dict(ambient if ambient is not None else os.environ)
+    dropped = [k for k in ambient if k.startswith(TUNING_PREFIXES)]
+    for k in dropped:
+        del ambient[k]
+    return ambient, sorted(dropped)
+
+
 class SubprocessRuntime:
     """Spawns `vllm serve` locally."""
 
     def __init__(self, base_env: dict[str, str] | None = None) -> None:
-        #: The environment engines start from. In the shipped image this is controlled
-        #: exactly, so a configuration only ever *adds* to it.
-        self.base_env = dict(base_env if base_env is not None else os.environ)
+        #: The environment engines start from. A configuration *adds* to this; nothing
+        #: reaches an engine that golite did not decide to send.
+        self.base_env, self.dropped_env = declared_env(base_env)
 
     async def spawn(self, config: EngineConfig, port: int) -> SubprocessHandle:
         env = {**self.base_env, **config.env}

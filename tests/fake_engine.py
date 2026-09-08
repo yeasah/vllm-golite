@@ -16,14 +16,24 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Shaped after the lines the scanner looks for. Not a claim about vLLM's real output --
-# the calibration path for that is `python -m golite.engine.logscan` on a real capture.
+# Real lines, lifted from tests/data/vllm-start-qwen3.8-27b.log so the fake exercises
+# the patterns the way an engine actually writes them -- including the (EngineCore pid=)
+# prefix, which anything anchored to line start would miss.
 BANNER = [
-    "INFO vllm: starting engine",
-    "INFO gpu memory: 15.28 GiB is free of 15.51 GiB total",
-    "INFO GPU KV cache size: 67,584 tokens",
-    "INFO Maximum concurrency for 262,144 tokens per request: 1.03x",
-    "INFO To fully utilize gpu memory pass --kv-cache-memory=1323302912",
+    "(EngineCore pid=1) INFO [gpu_model_runner.py:5515] Model loading took 10.24 GiB "
+    "memory and 2.623740 seconds",
+    "(EngineCore pid=1) INFO [interface.py:986] Setting attention block size to 3072 "
+    "tokens to ensure that attention page size is >= mamba page size.",
+    "(EngineCore pid=1) INFO [gpu_worker.py:578] Available KV cache memory: 3.01 GiB",
+    "(EngineCore pid=1) INFO [kv_cache_utils.py:1883] GPU KV cache size: 172,032 tokens, "
+    "Maximum concurrency for 172,032 tokens per request: 1.00x",
+    "(EngineCore pid=1) INFO [gpu_worker.py:804] Free memory on device (15.28/15.51 GiB) "
+    "on startup. Desired GPU memory utilization is (0.92, 14.27 GiB). Actual usage is "
+    "10.47 GiB for consumed memory (weights + non-torch), 0.79 GiB for peak activation, "
+    "and 0.04 GiB for CUDAGraph memory. Replace gpu_memory_utilization config with "
+    "`--kv-cache-memory=3031561913` (2.82 GiB) to fit into requested memory, or "
+    "`--kv-cache-memory=4121221120` (3.84 GiB) to fully utilize gpu memory. Current kv "
+    "cache memory in use is 3.01 GiB.",
 ]
 
 

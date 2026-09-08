@@ -233,12 +233,21 @@ phase, on a checkpoint of each shape golite claims to serve. Phase breakdown is 
 candidate because the aggregate number does not say which lever to pull, and the
 levers differ (page cache, capture sizes, compile cache).
 
+**Largely answered for one configuration** (Qwen3.8-27B EXL3 3.00bpw + turboquant, one
+16 GiB card, 2026-09-07): 81.2 s cold, **24.1 s warm**, and compilation is essentially
+all of the difference. vLLM prints its own phase breakdown, so `logscan` harvests it on
+every start rather than needing a special run. What remains is coverage -- other model
+shapes and quantizations, where weight load may dominate instead -- and the action the
+measurement implies, which is that the shipped image should enable the compile cache.
+
 **The largest obvious lever is unavailable**: process reuse across engine starts is
 ruled out by vLLM's in-process leak, so interpreter start, imports and CUDA context
-creation are paid every time and cannot be amortized. Measure them anyway -- if they
-dominate, the answer is a smaller launch path, not a warm one.
+creation are paid every time and cannot be amortized. The warm figure above is what that
+floor actually costs.
 
-Nothing in the field notes quantifies this today.
+The warm/cold gap also moves `peak_activation` and therefore the KV cache size, which is
+a `fit-shortlist` and `fit-certify` concern before it is a latency one. See
+[docs/design.md](docs/design.md).
 
 ## `format-routing` -- Know which backend serves which checkpoint
 

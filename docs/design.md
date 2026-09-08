@@ -64,7 +64,49 @@ hardware:
 **The latency does not disappear with the feature.** With one engine, start cost is
 paid in full on every model change, and it becomes the appliance's dominant UX
 cost -- the number that decides whether "change models" reads as a setting or an
-outage. It is unmeasured (see `TODO: start-latency`).
+outage.
+
+First measurement, through the supervisor on 2026-09-07 (Qwen3.8-27B EXL3 3.00bpw,
+turboquant KV, one 16 GiB card): **74.2 s to healthy**, of which weight load was 2.6 s
+and `torch.compile` plus the profiling/warmup run was **50.3 s**. Compilation, not
+loading, is the cost -- and vLLM already breaks the phases down in its own startup log,
+so `start-latency` is mostly a parsing job rather than an instrumentation one.
+
+**And most of that cost is a development artifact, not an appliance one.** That run
+inherited `VLLM_DISABLE_COMPILE_CACHE=1`, which is set on the development box because
+plugin work invalidates the compile cache without changing anything the cache keys on --
+a stale artifact is worse than a slow start. The shipped image has a frozen plugin set,
+so it has no such problem: **the appliance should enable the compile cache.**
+
+Measured on the same configuration, cache written on the first start and hit on the
+next (warm figures identical across three consecutive runs):
+
+| | cold cache | warm cache |
+|---|---|---|
+| start to healthy | 81.2 s | **24.1 s** |
+| init engine | 63.5 s (compilation 22.2 s) | 6.4 s (compilation 0.4 s) |
+| peak activation | 0.79 GiB | **0.40 GiB** |
+| available KV cache | 3.01 GiB | **3.41 GiB** |
+| `--max-model-len auto` resolved to | 172,032 | **196,608 tokens** |
+
+**The second half of that table is the part worth stopping on.** A warm cache did not
+only start faster, it profiled *half* the peak activation, and `auto` therefore resolved
+to 14% more context. Compilation happens in the same process before the profiling run,
+so a cold cache leaves the allocator in a state that inflates the measured transient --
+and vLLM sizes the KV cache from that measurement.
+
+Two consequences, both for the fit tiers:
+
+- **A fit measured on a cold compile cache understates capacity**, here by 14%. So
+  compile-cache state belongs in the fit cache key, or tier 2 must always measure warm
+  and say so.
+- **Pinning `--kv-cache-memory` from a cold start freezes the smaller cache
+  permanently**, since pinning also suppresses the profile run that would have found the
+  larger one. That is the trap already listed above, arriving by a route nobody would
+  look for.
+
+The cache is only safe because the plugin set cannot change underneath it, which is the
+same self-description requirement the fit cache has.
 
 ### Deliberately deferred, and the shape each should take
 
@@ -232,7 +274,13 @@ comments where nothing can select them. Read as a spec, the pile says:
   those fields.
 - **Environment is per-invocation and matters** -- `PYTORCH_CUDA_ALLOC_CONF=...`
   before the torch import, `EXL3_RECONSTRUCT_THRESHOLD=0` -- so it is part of a
-  configuration, not ambient. (The `unset` in one script is a dev-environment artifact,
+  configuration, not ambient. A structured `env` map also removes a failure mode the
+  scripts have: in `sh`, a bare `VAR=value` on its own line sets a shell variable and
+  does *not* export it, so a knob can silently stop reaching the engine when a script is
+  reformatted. That exact slip was live in `run-qwen3.8-27b.sh`, and it is invisible
+  precisely because `expandable_segments` is a fragmentation knob -- it bites only after
+  days of uptime, which is how it was found in the first place (a multi-day SWE-bench run
+  that OOMed with elevated unavailable memory). (The `unset` in one script is a dev-environment artifact,
   not a requirement: the image controls the base set exactly, and most such variables
   take `=0` anyway.)
 
@@ -342,12 +390,26 @@ concurrency until the mid-session cliff appears.
 
 ### Traps for the config generator
 
-- **Do not apply vLLM's own `--kv-cache-memory=` suggestion.** It subtracts CUDA
-  graph memory and a deliberate 150 MiB redundancy buffer that the profiler did not
-  count, so it lands routinely *below* what the running engine is already surviving
-  on -- handing back cache the config demonstrably did not need to give up. Both
-  numbers are self-consistent; neither is a bug. Verified to the reported digits on
-  a 15.5 GiB card: 4.24 running, 4.03 "fully utilize", 3.95 "requested".
+- **vLLM prints two `--kv-cache-memory=` suggestions, and they are not
+  interchangeable.** One "to fit into requested memory", one "to fully utilize gpu
+  memory". Measured on the 2026-09-07 capture (Qwen3.8-27B EXL3 3.00bpw, turboquant
+  KV): **2.82 GiB requested, 3.01 GiB actually in use, 3.84 GiB to fully utilize** --
+  the two bracket the running value. An earlier measurement on the same card had both
+  below it (4.24 running, 4.03 "fully utilize", 3.95 "requested").
+
+  The direction is *not* fixed, and it is not noise either: it is set by how
+  over-reserved `peak_activation` is, which is a property of the **KV/attention backend**
+  rather than of the card. This capture is turboquant, whose vLLM attention backend has
+  significant prefill transients -- a full-context uncached prompt spikes VRAM that must
+  be reserved and then mostly sits empty -- so this configuration cannot reach higher
+  utilization at all. The fp8 configurations for the same model target 0.97 and may sit
+  above the bracket instead. So the rule "the suggestion is lower than what is running"
+  holds for the requested figure and not reliably for the other. What is
+  stable is the mechanism: both subtract CUDA graph memory and a deliberate 150 MiB
+  redundancy buffer that the profiler did not count, and the running config survives on
+  `peak_activation` being over-reserved. Both numbers are self-consistent; neither is a
+  bug. **Harvest both, apply neither blindly**, and never treat one as "the"
+  suggestion -- which is what a config generator reading the first match would do.
 - **Pinning `--kv-cache-memory` suppresses the profile run and all memory
   reporting.** So the shrink above is one-shot -- unless the manager re-measures by
   unpinning and repinning, which turns it into a ratchet.
