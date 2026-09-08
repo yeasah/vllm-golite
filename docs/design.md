@@ -9,6 +9,29 @@ that does not.
 This note records the initial design and the reasoning behind the calls, so the
 ones made for a reason survive contact with the first refactor.
 
+## The bugs worth fixing here are the ones that scale inversely with VRAM
+
+0.4 GiB of misattributed activation is a rounding error on a datacenter card and 14% of
+context on a 16 GiB one. The same defect, the same patch, and a completely different
+case for spending a week on it.
+
+That asymmetry is not a complaint about upstream -- it is a correct prioritization given
+who upstream serves, and it will keep being correct. It is the reason this project finds
+things worth fixing that are not worth fixing to anyone else, and the reason carrying a
+fork is a standing cost rather than a temporary one.
+
+Two working rules follow, and they pull in opposite directions:
+
+- **Still check upstream first.** This stack has repeatedly paid for maintaining what
+  upstream was already maintaining, and staleness has cost more than churn.
+- **But do not wait on a fix whose magnitude only matters here.** When a defect's
+  significance scales inversely with the reporter's VRAM budget, "reported upstream" is
+  not a plan. Report it, then carry the workaround, and expect to carry it.
+
+The corollary for measurement: the appliance has to be able to detect these itself,
+because nobody else's CI will. That is most of the argument for the fit tiers being
+instruments rather than estimators.
+
 ## Scope, and the boundary below it
 
 golite is downstream of `vllm-exl3-plugin` and its siblings. It does not pull
@@ -129,9 +152,14 @@ the compile and warmup timings, so a measurement can be labelled with the state 
 taken in. It identifies the case it can name and does not pretend to detect the rest:
 nothing in vLLM's log says whether torch's own caches were warm.
 
+The two caches are complementary rather than redundant, which is worth knowing before
+reaching for either: torch's caches kernel codegen, vLLM's caches the traced and
+AOT-compiled callable. A cache-disabled start with torch's caches warm compiles the graph
+in 0.71 s but still spends 5.2 s in Dynamo; the cache-hit start has no Dynamo line at all.
+
 This looks like a vLLM defect rather than a golite problem -- a memory profiler should
-not be measuring the compiler -- and is worth reporting upstream rather than only worked
-around here.
+not be measuring the compiler -- and is worth reporting upstream. It is also, realistically,
+**a defect upstream has little reason to prioritize**, which is the next section.
 
 ### Warm before measuring, and warm before serving
 
