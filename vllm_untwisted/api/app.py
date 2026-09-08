@@ -177,7 +177,8 @@ def create_app(store: Store | None = None, manager: Manager | None = None) -> Fa
         entry = _require(app, body.ref)
 
         async def go() -> None:
-            app.state.events.publish("engine.state", state="starting", config=entry.name)
+            app.state.events.publish("engine.state", state="starting", config=entry.name,
+                                     config_id=entry.id)
             try:
                 started = await manager.start(entry.id)
             except Exception as exc:  # a start that fails to even launch
@@ -188,8 +189,10 @@ def create_app(store: Store | None = None, manager: Manager | None = None) -> Fa
             # the signal that something belongs on this stream.
             app.state.events.publish(
                 "engine.state",
+                id=started.record.id,
                 state=str(started.record.state),
                 config=entry.name,
+                config_id=entry.id,
                 port=started.record.port,
                 startup_seconds=started.record.startup_seconds,
                 compile_state=manager.supervisor.compile_state,
@@ -262,8 +265,10 @@ def _engine_out(app: FastAPI) -> EngineOut:
     orphaned = [f"pid {o.pid}: {o.cmdline[:120]}" for o in manager.reclaimed_orphans]
     if record is None:
         return EngineOut(state=str(manager.supervisor.state), reclaimed_orphans=orphaned)
+    
     failure = record.failure
     return EngineOut(
+        id=record.id,
         state=str(record.state), config=record.config_name, port=record.port,
         pid=record.pid, startup_seconds=record.startup_seconds,
         compile_state=manager.supervisor.compile_state,

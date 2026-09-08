@@ -80,6 +80,10 @@ class StartIn(BaseModel):
 
 
 class EngineOut(BaseModel):
+    #: This engine's id. Present with one engine so that clients are written against a
+    #: keyed thing from the start -- the point of foreclosing nothing about multi-engine
+    #: is lost if the identifier stops at the boundary.
+    id: str | None = None
     state: str
     config: str | None = None
     config_id: str | None = None

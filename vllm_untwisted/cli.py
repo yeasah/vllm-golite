@@ -184,6 +184,27 @@ async def cmd_api(client: httpx.AsyncClient, args) -> int:
     return 0 if r.status_code < 400 else 1
 
 
+async def cmd_ps(client: httpx.AsyncClient, args) -> int:
+    engine = (await client.get("/api/engine")).json()
+    if engine["state"] == "stopped" and not engine["config"]:
+        print("no engine running", file=sys.stderr)
+        return 0
+    started = f"{engine['startup_seconds']:.1f}s" if engine["startup_seconds"] else "-"
+    print(f"{engine['id'] or '-':<10} {engine['config'] or '-':<34} {engine['state']:<9} "
+          f"port {engine['port'] or '-'}  started in {started}")
+    for reclaimed in engine["reclaimed_orphans"]:
+        print(f"reclaimed orphaned engine: {reclaimed}", file=sys.stderr)
+    return 0
+
+
+async def cmd_stop(client: httpx.AsyncClient, args) -> int:
+    r = await client.post("/api/engine/stop")
+    if r.status_code >= 400:
+        return _fail(r)
+    print(f"engine {r.json()['state']}")
+    return 0
+
+
 async def _watch_engine(client: httpx.AsyncClient, args) -> int:
     """Consume the event stream until the engine settles.
 
@@ -222,7 +243,7 @@ async def _watch_engine(client: httpx.AsyncClient, args) -> int:
                             "maximum_concurrency", "peak_activation_gib"):
                     if key in facts:
                         print(f"  {key:<26} {facts[key]}")
-                if args.once:
+                if args.once or args.detach:
                     return 0
                 print("\nserving; ctrl-c to stop", file=sys.stderr)
             elif state in ("failed", "stopped"):
@@ -247,6 +268,14 @@ async def cmd_run(client: httpx.AsyncClient, args) -> int:
     client's job. Unwinding through a KeyboardInterrupt would leave that undone on a
     closing event loop.
     """
+    if args.detach and not args.url:
+        # The embedded server is a child of this process: exiting would take it, and its
+        # shutdown stops the engine. Detaching is only meaningful against a manager that
+        # outlives the client.
+        print("error: --detach needs a running manager (--url); without one the server "
+              "is part of this command and exits with it", file=sys.stderr)
+        return 2
+
     r = await client.post("/api/engine/start", json={"ref": args.ref})
     if r.status_code >= 400:
         return _fail(r)
@@ -269,13 +298,15 @@ async def cmd_run(client: httpx.AsyncClient, args) -> int:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         outcome = watcher.result() if watcher in done else 0
-    finally:
+    finally:  # noqa: B012
         for sig in installed:
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.remove_signal_handler(sig)
         # Always, including after an interrupt: nothing else will stop the engine.
-        with contextlib.suppress(Exception):
-            await client.post("/api/engine/stop", timeout=60.0)
+        # Unless detaching, which is the one case where leaving it running is the point.
+        if not (args.detach and outcome == 0):
+            with contextlib.suppress(Exception):
+                await client.post("/api/engine/stop", timeout=60.0)
     return outcome
 
 
@@ -304,9 +335,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="start a stored configuration")
     p.add_argument("ref")
-    p.add_argument("--once", action="store_true")
+    p.add_argument("--once", action="store_true",
+                   help="stop as soon as it is healthy (a warmup or measurement pass)")
+    p.add_argument("-d", "--detach", action="store_true",
+                   help="leave it running and exit (needs --url)")
     p.add_argument("-v", "--verbose", action="store_true", help="stream engine output")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("ps", help="show the running engine")
+    p.set_defaults(func=cmd_ps)
+
+    p = sub.add_parser("stop", help="stop the running engine")
+    p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("import-sh", help="read invocations out of shell scripts")
     p.add_argument("files", nargs="+")

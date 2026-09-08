@@ -104,6 +104,24 @@ and let endpoints accrete against the CLI -- which is the first consumer, since 
 will not exist for a while. Watch for polling: it means something belongs on the event
 stream. See [docs/design.md](docs/design.md).
 
+## `engine-logs` -- History, not just a tail
+
+`logs` for a running engine and for one that finished last week. Unblocks diagnosing a
+failure after the fact, which the log tail stapled to a failure record only approximates,
+and it is the last of the container-shaped verbs that is not a single request.
+
+**Candidate approach:** a sequence number per line, with history and follow served from
+one ordered source. It is the candidate because the naive split has a race either way --
+snapshot then subscribe loses the lines in between, subscribe then snapshot duplicates
+them -- and neither shows up in testing. Sequence numbers also make SSE's own
+`Last-Event-ID` reconnection exact.
+
+**Engine output to disk, one file per run**, keyed by the run id already in the store.
+The 400-line ring does not cover a single startup under load, and a bigger ring only
+moves the failure; the ring is for live tailing and the file is the record.
+
+See [docs/design.md](docs/design.md).
+
 ## `frontend-foundation` -- The UI shell, before it is needed
 
 Build pipeline, the bundle served by the manager process itself, event-stream client

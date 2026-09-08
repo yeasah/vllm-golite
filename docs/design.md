@@ -274,6 +274,43 @@ Two constraints that are easy to miss:
   for state -- so polling appearing anywhere is a signal that something belongs on the
   stream instead.
 
+### What a container-shaped CLI would need, and what that says about now
+
+The CLI has come out looking like `docker`, which makes the missing verbs obvious:
+detached start, `ps`, `logs`, `stop`. Most are thin -- `ps` and `stop` are one request
+each -- and they only mean anything against a manager that outlives the client. Two of
+them point at design decisions worth settling before something is built on the wrong one.
+
+**An id has to reach the boundary or it is not really there.** `EngineRecord` carried an
+`id` from the first commit specifically so multi-engine would not be foreclosed, and it
+was exposed in no response and no event. A frontend written against that API would have
+keyed on nothing, and adding the key later is the breaking change the id existed to
+avoid. Responses and events carry it now. The URL space is still singular
+(`/api/engine`), and that is fine: adding `/api/engines` alongside it later is additive.
+What is *not* additive is a client that never learned engines have identity.
+
+**Log history is not the live stream with a buffer bolted on.** Following works today;
+attaching to something already running does not, because the bus has no replay and the
+supervisor's ring is 400 lines and unexposed. The obvious fix has a race in it: fetch the
+buffer and then subscribe and the lines in between are lost; subscribe and then fetch and
+they arrive twice. Neither is visible in testing and both are wrong. The shape that works
+is a **sequence number per line**, so history and follow come from one ordered source and
+a client can say where it got to -- which is also what makes SSE's own reconnect
+(`Last-Event-ID`) exact rather than approximate.
+
+The ring should not become the archive, either. 400 lines does not cover one startup of a
+loaded engine, and the answer to that is not a bigger ring, which just moves the outage.
+**Engine output belongs on disk, one file per run**, keyed by the run id the store
+already records. That makes `logs` work for a run that failed last week, which is what
+the `log_tail` currently stapled to a failure record is a poor substitute for, and it
+leaves the in-memory ring doing the one job it is good at.
+
+**Detaching is the first thing the embedded server cannot do.** With no `--url` the
+manager is part of the command and its shutdown stops the engine, so `--detach` is
+refused there rather than silently producing an engine that dies on exit. Worth noting
+precisely: running the API in-process is still one code path, but it is not the same
+capability set, and anything that outlives a command belongs to a manager that does too.
+
 ### The CLI is a generic client, not a mirrored command surface
 
 Parity is the trap: mirroring every UI feature into a command means maintaining two
