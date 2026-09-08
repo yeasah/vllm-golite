@@ -47,6 +47,17 @@ class EngineConfig:
         argv = self.argv(port) if port is not None else [*self.launcher, self.model, *self.args]
         return " ".join(filter(None, [env, shlex.join(argv)]))
 
+    def to_doc(self) -> dict:
+        """The stored form. Plain JSON types only, and the same shape the CLI exports."""
+        return {"model": self.model, "launcher": list(self.launcher),
+                "args": list(self.args), "env": dict(self.env)}
+
+    @classmethod
+    def from_doc(cls, name: str, doc: dict) -> EngineConfig:
+        return cls(name=name, model=doc["model"], args=list(doc.get("args", [])),
+                   env=dict(doc.get("env", {})),
+                   launcher=tuple(doc.get("launcher", ("vllm", "serve"))))
+
     def with_args(self, **flags: str | None) -> EngineConfig:
         """Return a copy with `--flag value` set or removed.
 
