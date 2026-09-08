@@ -91,3 +91,5 @@ class EngineOut(BaseModel):
     failure_summary: str | None = None
     facts: dict[str, str] = Field(default_factory=dict)
     reclaimed_shm: list[str] = Field(default_factory=list)
+    #: Engines a previous manager left running and this one killed at startup.
+    reclaimed_orphans: list[str] = Field(default_factory=list)

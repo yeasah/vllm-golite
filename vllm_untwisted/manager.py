@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vllm_untwisted import fingerprint as fp
-from vllm_untwisted.engine import EngineState, Supervisor
+from vllm_untwisted.engine import EngineState, Supervisor, orphans
 from vllm_untwisted.engine.state import EngineRecord
 from vllm_untwisted.store import ConfigEntry, Store
 
@@ -46,12 +46,27 @@ class Manager:
         store: Store,
         supervisor: Supervisor | None = None,
         fingerprint: dict[str, str] | None = None,
+        owner: str | None = None,
+        reap_orphans: bool = True,
     ) -> None:
         self.store = store
         self.supervisor = supervisor or Supervisor()
         #: Collected once. It describes the box, which does not change between starts,
         #: and shelling out to nvidia-smi on every launch would be noise.
         self.fingerprint = fp.collect() if fingerprint is None else fingerprint
+
+        # Engines carry the store they belong to, so an engine left behind by a manager
+        # that died can be recognised later without a record of it surviving anywhere.
+        self.owner = owner or str(store.path)
+        runtime = self.supervisor.runtime
+        if getattr(runtime, "owner", None) is None:
+            runtime.owner = self.owner
+
+        # Reclaim before anything else. A previous manager that was killed rather than
+        # stopped left its engine running and holding the GPU, and the next start would
+        # otherwise fail in a way that reads as a memory regression.
+        self.reclaimed_orphans = [] if not reap_orphans else orphans.reap(self.owner)
+
         self._run_id: str | None = None
         self._entry: ConfigEntry | None = None
 

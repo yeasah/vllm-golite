@@ -496,6 +496,36 @@ Tier 3 is the appliance verdict and the one nobody else produces. It is also
 guidellm's real job here -- not throughput numbers, but walking context depth and
 concurrency until the mid-session cliff appears.
 
+### A hard exit leaves an engine running, and only we can tell which one is ours
+
+Stopping an engine on the way out covers an orderly exit. A SIGKILL, an OOM kill or a
+crash in the manager does not get one, and the engine survives -- deliberately, since it
+is spawned into its own session so a stray Ctrl-C cannot kill it mid-serve. Nothing else
+will clean it up. The next start then finds the GPU occupied, which reads as a memory
+regression in whatever changed since.
+
+**In a container this is trivial and outside one it is not.** A container owns its PID
+namespace, so everything in it belongs to the appliance and a restart can reap the lot.
+untwisted runs outside a container for the whole of development, where killing every
+`vllm` on the box would take out whatever the developer is running from their own shell.
+That is a worse failure than the one being fixed, and it is the general form of the
+development-versus-deployment asymmetry recorded above.
+
+So engines carry `UNTWISTED_ENGINE_OWNER`, set to the store they belong to, and the rule
+has two halves:
+
+> Reap a marked engine only when **its parent is gone.**
+
+A manager that is alive is still its engine's parent, so a second manager -- the CLI's
+embedded server, started while one is serving -- cannot reap a supervised engine. An
+orphan has been reparented away from a manager that no longer exists, and an orphan is
+the only thing this touches. Another installation's marker, and an unmarked `vllm`
+somebody else started, are both none of our business.
+
+Reclaimed orphans are reported rather than quietly killed, for the same reason reclaimed
+shared memory is: an engine that outlived its manager means the manager died badly, and
+that is worth knowing when the next thing goes wrong.
+
 ### Warm before measuring, and warm before serving
 
 The practical lesson from the capacity result is not mainly about caches, it is that

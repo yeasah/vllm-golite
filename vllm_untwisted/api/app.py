@@ -83,6 +83,11 @@ def create_app(store: Store | None = None, manager: Manager | None = None) -> Fa
     app.state.store = store or Store(_default_store())
     app.state.manager = manager or Manager(app.state.store, Supervisor())
     app.state.events = EventBus()
+    for orphan in app.state.manager.reclaimed_orphans:
+        # Loud on purpose: an engine outliving its manager means the manager died badly,
+        # and that is worth knowing about when the next thing goes wrong.
+        app.state.events.publish("engine.reclaimed", pid=orphan.pid,
+                                 cmdline=orphan.cmdline[:200])
     app.state.starting = None
 
     # Engine output goes straight onto the stream. Synchronous by design: this runs in
@@ -254,8 +259,9 @@ def _require(app: FastAPI, ref: str) -> ConfigEntry:
 def _engine_out(app: FastAPI) -> EngineOut:
     manager: Manager = app.state.manager
     record = manager.supervisor.record
+    orphaned = [f"pid {o.pid}: {o.cmdline[:120]}" for o in manager.reclaimed_orphans]
     if record is None:
-        return EngineOut(state=str(manager.supervisor.state))
+        return EngineOut(state=str(manager.supervisor.state), reclaimed_orphans=orphaned)
     failure = record.failure
     return EngineOut(
         state=str(record.state), config=record.config_name, port=record.port,
@@ -264,6 +270,7 @@ def _engine_out(app: FastAPI) -> EngineOut:
         failure_kind=None if failure is None else str(failure.kind),
         failure_summary=None if failure is None else failure.summary,
         facts=dict(record.facts), reclaimed_shm=list(record.reclaimed_shm),
+        reclaimed_orphans=orphaned,
     )
 
 

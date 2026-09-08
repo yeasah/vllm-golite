@@ -19,6 +19,7 @@ import signal
 from typing import Protocol, runtime_checkable
 
 from vllm_untwisted.engine.config import EngineConfig
+from vllm_untwisted.engine.orphans import OWNER_VAR
 
 
 @runtime_checkable
@@ -144,13 +145,19 @@ def declared_env(ambient: dict[str, str] | None = None) -> tuple[dict[str, str],
 class SubprocessRuntime:
     """Spawns `vllm serve` locally."""
 
-    def __init__(self, base_env: dict[str, str] | None = None) -> None:
+    def __init__(self, base_env: dict[str, str] | None = None,
+                 owner: str | None = None) -> None:
+        #: Stamped into every engine's environment so an orphan can be recognised after
+        #: the manager that started it is gone. See `vllm_untwisted.engine.orphans`.
+        self.owner = owner
         #: The environment engines start from. A configuration *adds* to this; nothing
         #: reaches an engine that untwisted did not decide to send.
         self.base_env, self.dropped_env = declared_env(base_env)
 
     async def spawn(self, config: EngineConfig, port: int) -> SubprocessHandle:
         env = {**self.base_env, **config.env}
+        if self.owner:
+            env[OWNER_VAR] = self.owner
         proc = await asyncio.create_subprocess_exec(
             *config.argv(port),
             stdout=asyncio.subprocess.PIPE,
