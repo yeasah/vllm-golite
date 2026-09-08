@@ -144,6 +144,44 @@ Migrated from `vllm-virtualkv-plugin`'s TODO, where it was recorded so as not to
 but was explicitly not that plugin's business. Removing it there is still outstanding.
 See [docs/design.md](docs/design.md).
 
+## `model-refs` -- A checkpoint is named by identifier, not by host path
+
+Stored configurations name checkpoints the manager can resolve, rather than paths only
+the developer's machine has. Unblocks running a stored configuration inside the image at
+all, and makes tier 0 (`tp_preflight --remote`, `checkpoint_survey`) applicable to every
+entry instead of only to checkpoints not yet fetched.
+
+**Candidate approach:** repo id plus revision, resolved through the HF cache. It is the
+candidate because the reason local variants exist here -- block-quantized embeddings
+written into a copy of the checkpoint -- has an escape hatch: the plugin can do that
+quantization at load time, so the stock checkpoint serves the same configuration.
+
+**Sequenced with a cost, not after it.** Load-time quantization adds several seconds to
+every start, against a measured warm start of 24.1 s. Caching the quantized embeddings
+between launches is therefore part of this item rather than a later optimization of it.
+
+**Explicitly deferred:** first-class support for checkpoints outside the HF cache. Done
+properly it needs an adjacent cache with its own indexing, enumeration and management,
+presented alongside the HF cache, plus checkpoint import through the API. Worth building
+when something needs it; the escape hatch means nothing does yet. See
+[docs/design.md](docs/design.md).
+
+## `resource-boundary` -- Fail in development the way the image would
+
+The manager declares the roots it may touch and refuses anything outside them, in every
+environment. Unblocks trusting a development run: today the manager shares a filesystem
+with the whole box and will not in deployment, so anything that works by reaching outside
+its own space works by accident and fails only in the image.
+
+**Candidate approach:** an explicit set of allowed roots -- checkpoints, store, caches --
+checked in code rather than imposed by the container. It is the candidate because the
+container cannot be the only enforcement: development never exercises it, which is how the
+shell importer's `is_dir()` check got written and passed its tests.
+
+Same failure shape as the compile-cache finding in [docs/design.md](docs/design.md):
+development conditions differ from deployment, the difference changes behaviour, and
+nothing announces it.
+
 ## `router` -- One endpoint that survives engine restarts
 
 A stable OpenAI-compatible address, so client configs are not rewritten on every

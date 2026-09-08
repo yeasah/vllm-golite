@@ -299,6 +299,61 @@ separate node server in the container -- and the dev loop is HMR against a runni
 manager. Neither is a large decision, but both are the difference between UI work being
 pleasant and being miserable, and the first one shapes the container.
 
+## The container is not the boundary, and in development it is not there at all
+
+The manager will not be containerized during development -- doing so for every edit is
+burdensome enough that it would simply not happen. So in development the manager shares a
+filesystem, and potentially other host resources, with everything else on the box, and in
+deployment it does not.
+
+**Anything that works because the manager can see the host filesystem is a development
+accident.** The first instance was the shell importer's checkpoint resolution, which
+tested `is_dir()` against a path only the caller can see; it worked perfectly and would
+have failed in the image. There will be more, because nothing in a development run
+exercises the constraint.
+
+This is the same shape as the compile-cache result earlier in this note: development
+conditions differ from deployment conditions, the difference changes behaviour, and
+nothing announces it. The mitigation is the same too -- **make the constraint active in
+development rather than relying on the container to impose it**. The manager declares the
+roots it may touch (checkpoints, store, caches) and refuses anything outside them
+identically in both environments, so a development run fails the way the image would
+instead of succeeding by accident. The container then becomes defence in depth rather
+than the only defence. See `TODO: resource-boundary`.
+
+## A model reference is an identifier, not a path
+
+A stored configuration cannot name a checkpoint by host path. In deployment that path is
+inside a container: naming it exposes internal layout that would have to be made
+discoverable, and that would then be a compatibility surface which changes when the image
+does. The importer's current path-resolution is a development affordance, not a design.
+
+Supporting checkpoints outside the HuggingFace cache *properly* is a real feature and not
+a tweak: it needs an adjacent cache, an indexing, enumeration and management scheme of our
+own, presentation alongside the HF cache, and import of checkpoints through the API. That
+is worth doing when something requires it.
+
+**Nothing does yet, because of an escape hatch.** The reason local checkpoint variants
+exist here at all is the EXL3 plugin's block-quantized embeddings -- `tools/quantize_embedding.py`
+writes `bq_*` tensors into a copy of the checkpoint, which is what the `-bq` suffixes in
+`~/ckpt` are. The plugin can also do that quantization at load time, which means the same
+configuration can be served from the stock checkpoint in the HF cache, and the model
+reference becomes a repo id and revision.
+
+Two consequences worth holding together:
+
+- **It moves cost onto the number that matters most.** Load-time quantization costs "a big
+  handful of seconds", and the appliance's dominant UX cost is exactly this: a warm start
+  of the measured configuration is 24.1 s. Several seconds is a 20-40% regression on the
+  most-felt number in the product, paid on every model change. So **caching the quantized
+  embeddings for later launches is not an optimization of a side feature** -- it is what
+  makes the escape hatch compatible with the latency budget, and it should be sequenced
+  with that in mind.
+- **It makes tier 0 work as designed.** `tp_preflight --remote` and `checkpoint_survey`
+  answer their questions from repository metadata before a download; a local path is
+  precisely the case they cannot help with. Identifiers make the cheapest fit tier
+  applicable to every stored configuration rather than only to the ones not yet fetched.
+
 ## Configurations are named and stored, however they were arrived at
 
 Two needs converge here, and they are the same store. **Today:** name and keep a
