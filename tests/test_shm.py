@@ -10,7 +10,7 @@ from __future__ import annotations
 import mmap
 from pathlib import Path
 
-from golite.engine import shm
+from vllm_untwisted.engine import shm
 
 
 def region(root: Path, name: str = "vllm_offload_abc123.mmap", size: int = 4096) -> Path:

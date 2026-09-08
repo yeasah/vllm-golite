@@ -1,6 +1,6 @@
 # The manager is the commodity; the sizing is the product
 
-golite serves one engine on one box and makes it easy to point a client at. That
+untwisted serves one engine on one box and makes it easy to point a client at. That
 much exists five times over. What does not exist anywhere is the thing that
 decides *what the engine's command line should be* -- and on the hardware this is
 aimed at, that decision is the whole difference between a model that runs and one
@@ -34,7 +34,7 @@ instruments rather than estimators.
 
 ## Scope, and the boundary below it
 
-golite is downstream of `vllm-exl3-plugin` and its siblings. It does not pull
+untwisted is downstream of `vllm-exl3-plugin` and its siblings. It does not pull
 stock vLLM: the engine environment is the patched fork plus the plugins, which is
 why "pull an image, pass a model id" -- vLLMManager's model -- does not transfer.
 The container *is* the engine environment.
@@ -58,7 +58,7 @@ The seam: llama-swap answers "which process should be running," Easy-vLLM answer
 "will it fit" (statically, in a browser), and **nothing joins them.** llama-swap's
 config is a hand-written `cmd:` line per model -- the user still writes the
 `vllm serve` invocation themselves, which is the two-hundred-flag problem Easy-vLLM
-named and did not solve for anyone actually serving. golite computes the command
+named and did not solve for anyone actually serving. untwisted computes the command
 llama-swap makes you type.
 
 `llama_params_fit()` is the closest prior art, and the difference is what makes
@@ -79,7 +79,7 @@ hardware:
   swapping only makes sense single-user.
 - A swap policy safe enough to enable would have to refuse to stop recently-used
   engines and refuse to launch unless the new engine fits. Under a memory budget
-  tight enough to need golite at all, those two rules compose to *almost never
+  tight enough to need untwisted at all, those two rules compose to *almost never
   launch*. The complexity buys a case that rarely fires.
 - On-demand swapping is inseparable from multi-engine support, which is the
   complexity not worth introducing first.
@@ -157,7 +157,7 @@ reaching for either: torch's caches kernel codegen, vLLM's caches the traced and
 AOT-compiled callable. A cache-disabled start with torch's caches warm compiles the graph
 in 0.71 s but still spends 5.2 s in Dynamo; the cache-hit start has no Dynamo line at all.
 
-This looks like a vLLM defect rather than a golite problem -- a memory profiler should
+This looks like a vLLM defect rather than an untwisted problem -- a memory profiler should
 not be measuring the compiler -- and is worth reporting upstream. It is also, realistically,
 **a defect upstream has little reason to prioritize**, which is the next section.
 
@@ -218,7 +218,7 @@ way round.
 
 `vllm-exl3-plugin/tools/` holds four tools written to one philosophy -- screen
 cheaply before spending something expensive (rental hours, bandwidth, GPU time).
-golite is the first consumer that ties them to a serving decision rather than a
+untwisted is the first consumer that ties them to a serving decision rather than a
 benchmarking one.
 
 | tool | tier | why it is not replaceable by arithmetic |
@@ -296,8 +296,6 @@ where Easy-vLLM had to reimplement config parsing in JavaScript. Sizing is where
 silent wrongness lives, and reimplementation is where it enters. Keep the manager
 in its own venv from the engine's, in the same container.
 
-`golite` is a working name.
-
 ## The shippable is the product's real entry point
 
 This is a complicated system to bootstrap by hand -- a forked vLLM, a forked
@@ -328,13 +326,13 @@ Two things to carry over from it, and one not to:
 - **Do not carry the base image.** vast-vllm builds on `vastai/pytorch:cuda-13.0.3-auto`
   because the wheels had to run on *vast's* runtime image. That was correct there and
   is meaningless here. What transfers is the invariant, not the tag: **the build base
-  must agree with the runtime base**, and for golite we choose both.
+  must agree with the runtime base**, and for untwisted we choose both.
 
 [`vllm-fork/docker/Dockerfile`](../vllm-fork/docker/Dockerfile) is the reference for
 the half that does not exist yet -- pinned `CUDA_VERSION`/`PYTHON_VERSION` (13.0.3,
 3.12), wheels built against the same glibc floor as PyTorch's published wheels, and a
 runtime lineage (`vllm-runtime-base` -> `vllm-base` -> `vllm-openai`) that keeps the
-toolchain out of the serving image. golite's image belongs at **`vllm-base`, not
+toolchain out of the serving image. untwisted's image belongs at **`vllm-base`, not
 `vllm-openai`**: it replaces the entrypoint rather than wrapping it.
 
 Read it as a reference, not as text to copy. The fork rebases on upstream; copied
@@ -344,7 +342,7 @@ duplicating what upstream was maintaining.
 It is also stale -- pinned to `VLLM_VERSION=v0.27.0` and applying
 `vllm-exl3-plugin/patches/vllm-*.patch`, a directory that no longer exists now that
 both dependencies are submodules and the vLLM fork sits on a branch named, aptly,
-`appliance/v0.28.0`. That is the rental workflow's problem, not golite's: golite is
+`appliance/v0.28.0`. That is the rental workflow's problem, not untwisted's: untwisted is
 not blocked on it, and the pile is vast-specific enough that generalizing it would
 cost more than starting from the invariants above.
 
@@ -361,7 +359,7 @@ The development box is CentOS Stream 10 with podman and `nvidia-ctk` installed a
 **no docker at all**. The image is OCI and will run either place, but the commands
 around it are not interchangeable: builds are `podman build`, and GPU access is CDI
 (`nvidia-ctk cdi generate`, then `--device nvidia.com/gpu=all`) rather than docker's
-`--gpus all`. Whatever run scripts and docs golite ships have to lead with the podman
+`--gpus all`. Whatever run scripts and docs untwisted ships have to lead with the podman
 form, because it is the only one we can actually test.
 
 ### The bootstrap floor, stated honestly

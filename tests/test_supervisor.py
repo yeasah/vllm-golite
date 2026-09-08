@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from golite.engine import EngineConfig, EngineState, Supervisor
-from golite.engine.state import FailureKind
-from golite.engine.supervisor import EngineStartError, running
+from vllm_untwisted.engine import EngineConfig, EngineState, Supervisor
+from vllm_untwisted.engine.state import FailureKind
+from vllm_untwisted.engine.supervisor import EngineStartError, running
 
 FAKE = str(Path(__file__).parent / "fake_engine.py")
 

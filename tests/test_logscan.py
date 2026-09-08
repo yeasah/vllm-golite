@@ -7,8 +7,8 @@ that was never harvested.
 
 from pathlib import Path
 
-from golite.engine.logscan import FACTS, FLAGS, LogScanner
-from golite.engine.state import FailureKind
+from vllm_untwisted.engine.logscan import FACTS, FLAGS, LogScanner
+from vllm_untwisted.engine.state import FailureKind
 
 CAPTURE = Path(__file__).parent / "data" / "vllm-start-qwen3.8-27b.log"
 

@@ -22,11 +22,11 @@ from collections.abc import AsyncIterator, Callable
 
 import httpx
 
-from golite.engine.config import EngineConfig
-from golite.engine.logscan import LogScanner
-from golite.engine import shm
-from golite.engine.runtime import EngineHandle, EngineRuntime, SubprocessRuntime
-from golite.engine.state import EngineRecord, EngineState, Failure, FailureKind
+from vllm_untwisted.engine.config import EngineConfig
+from vllm_untwisted.engine.logscan import LogScanner
+from vllm_untwisted.engine import shm
+from vllm_untwisted.engine.runtime import EngineHandle, EngineRuntime, SubprocessRuntime
+from vllm_untwisted.engine.state import EngineRecord, EngineState, Failure, FailureKind
 
 #: How much log to keep in memory. A tail is what makes an unclassified failure still
 #: diagnosable; keeping all of it would grow without bound on a long-running engine.
@@ -69,7 +69,7 @@ class Supervisor:
         self.poll_interval = poll_interval
         #: Reclaim shared-memory regions a crashed engine left behind, before starting.
         #: On by default because the failure it prevents is silent: a leftover region of
-        #: matching size is adopted as the new engine's KV cache. See `golite.engine.shm`.
+        #: matching size is adopted as the new engine's KV cache. See `vllm_untwisted.engine.shm`.
         self.sweep_shm = sweep_shm
         self.shm_root = shm_root
 

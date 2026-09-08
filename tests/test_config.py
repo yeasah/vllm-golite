@@ -2,7 +2,7 @@
 
 import shlex
 
-from golite.engine import EngineConfig
+from vllm_untwisted.engine import EngineConfig
 
 # Straight out of ~/ckpt/run-qwen3.8-27b.sh: a JSON value with embedded quotes, which is
 # the case that breaks any scheme storing the invocation as a string and re-splitting it.

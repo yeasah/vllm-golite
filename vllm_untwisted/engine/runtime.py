@@ -18,7 +18,7 @@ import os
 import signal
 from typing import Protocol, runtime_checkable
 
-from golite.engine.config import EngineConfig
+from vllm_untwisted.engine.config import EngineConfig
 
 
 @runtime_checkable
@@ -113,7 +113,7 @@ class SubprocessHandle:
                 pass
 
 
-#: Namespaces the engine stack reads as *configuration*. Anything here that golite did
+#: Namespaces the engine stack reads as *configuration*. Anything here that untwisted did
 #: not put there is ambient state leaking into a run, so it is dropped unless the
 #: configuration asks for it.
 #:
@@ -146,7 +146,7 @@ class SubprocessRuntime:
 
     def __init__(self, base_env: dict[str, str] | None = None) -> None:
         #: The environment engines start from. A configuration *adds* to this; nothing
-        #: reaches an engine that golite did not decide to send.
+        #: reaches an engine that untwisted did not decide to send.
         self.base_env, self.dropped_env = declared_env(base_env)
 
     async def spawn(self, config: EngineConfig, port: int) -> SubprocessHandle:

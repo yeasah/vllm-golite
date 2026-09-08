@@ -83,7 +83,7 @@ See [docs/design.md](docs/design.md).
 ## `manager-api` -- One contract, and no way around it
 
 The interface the frontend and the CLI both speak. Unblocks both of them, and makes
-golite scriptable into existing workflows rather than a place work has to be done by
+untwisted scriptable into existing workflows rather than a place work has to be done by
 hand.
 
 **Candidate approach:** plain HTTP for state changes and queries, one multiplexed SSE
@@ -134,7 +134,7 @@ arithmetic exists and is upstream's own, and because the call needs a profiled e
 so it belongs inside engine init rather than reimplemented in the manager.
 
 **It belongs upstream**, and is worth more there than here. Carry it in the fork
-meanwhile, as a patch shaped for submission rather than a golite feature -- this project
+meanwhile, as a patch shaped for submission rather than an untwisted feature -- this project
 has paid repeatedly for maintaining what upstream would have taken.
 
 Migrated from `vllm-virtualkv-plugin`'s TODO, where it was recorded so as not to be lost
@@ -234,7 +234,7 @@ scopes whether load-time work (weight load, capture, compile cache) is worth
 optimizing.
 
 **Candidate approach:** instrument the supervisor and break the wall time down by
-phase, on a checkpoint of each shape golite claims to serve. Phase breakdown is the
+phase, on a checkpoint of each shape untwisted claims to serve. Phase breakdown is the
 candidate because the aggregate number does not say which lever to pull, and the
 levers differ (page cache, capture sizes, compile cache).
 
@@ -260,7 +260,7 @@ persistent state outside the configuration that moves measured capacity -- which
 
 ## `format-routing` -- Know which backend serves which checkpoint
 
-Model selection cannot be "any HuggingFace model": golite ships specific plugins,
+Model selection cannot be "any HuggingFace model": untwisted ships specific plugins,
 and the mapping from a checkpoint's quantization format to the backend that serves
 it is knowledge no upstream project has.
 
@@ -283,7 +283,7 @@ in the shipped image would drag the CUDA toolchain along with it.
 **Not blocked on vast-vllm**, and do not try to generalize it: that pile is
 vast-specific down to its base image, and its own staleness belongs to the rental
 workflow rather than here. It is a reference for the wheel half and nothing more.
-golite builds its own wheels against its own runtime base -- the invariant that
+untwisted builds its own wheels against its own runtime base -- the invariant that
 transfers is only that the two agree.
 
 Podman and CDI are the tested path; there is no docker on the development box. The

@@ -1,18 +1,18 @@
 """Re-check the log patterns against a capture.
 
-vLLM's log text is not an API, and every fact golite harvests rides on it. This is the
+vLLM's log text is not an API, and every fact untwisted harvests rides on it. This is the
 loop that turns a guess into an attested pattern and, more importantly, notices when an
 attested one silently stops matching after a bump. A pattern that never fires means
 unverified, not absent.
 
-    python -m golite.calibrate tests/data/vllm-start-qwen3.8-27b.log
+    python -m vllm_untwisted.calibrate tests/data/vllm-start-qwen3.8-27b.log
 """
 
 from __future__ import annotations
 
 import sys
 
-from golite.engine.logscan import FACTS, FLAGS, INTERESTING, LogScanner
+from vllm_untwisted.engine.logscan import FACTS, FLAGS, INTERESTING, LogScanner
 
 
 def calibrate(path: str) -> int:
@@ -47,5 +47,5 @@ def calibrate(path: str) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: python -m golite.calibrate <vllm-log-file>")
+        sys.exit("usage: python -m vllm_untwisted.calibrate <vllm-log-file>")
     sys.exit(calibrate(sys.argv[1]))

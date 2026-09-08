@@ -14,7 +14,7 @@ tier-2 measurement instead of only a launch.
 
 Patterns carry their provenance. Most are now `attested` against a real capture
 (Qwen3.8-27B EXL3 3.00bpw, turboquant KV, fork v0.28.0, 2026-09-07) kept as
-`tests/data/`. vLLM's log text is not an API, so `python -m golite.calibrate <log>`
+`tests/data/`. vLLM's log text is not an API, so `python -m vllm_untwisted.calibrate <log>`
 re-checks the table against any capture and reports what stopped matching.
 """
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from golite.engine.state import FailureKind
+from vllm_untwisted.engine.state import FailureKind
 
 ATTESTED = "attested"   # matched against a real capture kept in tests/data/
 LIKELY = "likely"       # standard library or framework text, not seen here
