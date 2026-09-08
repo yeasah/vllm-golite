@@ -94,314 +94,44 @@ cache (`/tmp/torchinductor_ypell`, 227 MB here) was cold too and is not the same
 container pays the large one once per model, and every model change after pays the
 small one.
 
-### An unexplained 14% of capacity, which is a fit-cache problem
+### The profiling run is contaminated by compilation, and it sizes the KV cache
 
-The first two starts on this box profiled **0.79 GiB of peak activation** and resolved
-`--max-model-len auto` to **172,032 tokens**. Every start since -- five of them,
-including both arms of the experiment above -- profiled **0.40 GiB** and resolved to
-**196,608 tokens**, and the transition has not reverted.
+vLLM profiles peak activation in the same process that has just compiled the model, and
+sizes the KV cache from what it measures. When substantial compilation lands in that
+process, the profiler counts compilation workspace as model activation, and the engine
+gets a smaller cache for the life of the run.
 
-An earlier draft of this note attributed that to the compile cache. **It does not:** the
-cold arm above has vLLM's compile cache explicitly disabled and still profiles the small
-transient. Something else on this machine cached between the second and third start and
-changed the measured capacity by 14%. Untested candidates include the flashinfer
-autotune cache, torch's inductor cache, and JIT warmup state; the cause is not
-established and should not be guessed at again in this file.
+Measured on one configuration and card (Qwen3.8-27B EXL3 3.00bpw, turboquant KV):
 
-What matters for the design does not depend on the cause:
+| compile-cache state | graph compile | compile + warmup | peak activation | KV cache | `auto` context |
+|---|---|---|---|---|---|
+| disabled, torch caches also cold | 8.71 s | 50.27 s combined | **0.79 GiB** | 3.01 GiB | 172,032 |
+| populating (collects AOT artifacts) | 13.90 s | 22.3 s + **34.04 s** warmup | **0.79 GiB** | 3.01 GiB | 172,032 |
+| disabled, torch caches warm | 0.71 s | 9.40 s combined | 0.40 GiB | 3.41 GiB | 196,608 |
+| hit | -- | 0.35 s + 1.69 s warmup | 0.40 GiB | 3.41 GiB | 196,608 |
 
-- **Persistent state outside the configuration can move measured capacity by 14%.**
-  Measuring instead of estimating is necessary and *not sufficient* -- a tier-2 result is
-  a measurement of one machine in one state, and that state is not fully enumerable.
-- So a stored fit result needs its provenance and a staleness rule that can be
-  conservative about things it cannot name, and the first measurement on a fresh box
-  should be treated as suspect until a second agrees with it.
-- Pinning `--kv-cache-memory` from an early start would have frozen the smaller cache
-  permanently, because pinning also suppresses the profile run that would later have
-  found the larger one.
+The populating row shows the mechanism most clearly: AOT artifacts are collected during
+the warmup run, so that run takes 34 s instead of 1.7 s and the transient it measures is
+correspondingly larger.
 
-The cache is only safe because the plugin set cannot change underneath it, which is the
-same self-description requirement the fit cache has.
+**`disabled` is not a safe state**, which is the counterintuitive part and the reason
+this is written as compilation volume rather than as a cache rule. The first and third
+rows are both cache-disabled and differ only in whether *torch's* caches -- separate from
+vLLM's, at `/tmp/torchinductor_ypell` here -- were warm. Same vLLM setting, 14% apart.
 
-### Deliberately deferred, and the shape each should take
+**So the first start of a configuration on a fresh box gets a worse cache than every
+start after it**, silently, and `--max-model-len auto` resolves against the contaminated
+figure. Pinning `--kv-cache-memory` from that start freezes it permanently, since pinning
+also suppresses the profile run that would later have found the larger number.
 
-- **Multi-engine.** Deferred, not foreclosed. The cost of foreclosing it is one
-  mistake: letting "the engine" become a global singleton. An engine record with an
-  id, and a router with a table that happens to hold one row, cost nothing now.
-- **A small always-resident embedding model.** The one co-residency case with
-  demonstrated use. It is *not* multi-engine and must not be built as it: it is a
-  **budget line item** -- subtracted off the top before the generative model is
-  sized -- never evicted, never scheduled, never arbitrated. Designing to that
-  asymmetry avoids growing a scheduler.
-- **Autotuning.** vllm-tuner's loop over a supervisor that already exists. For an
-  audience at low utilization, fitting at all dominates throughput tuning.
-- **Multi-node.** Out of scope. The `EngineRuntime` seam is what keeps it possible.
+`logscan` reports `compile_state` (`hit` / `populating` / `disabled` / `unknown`) plus
+the compile and warmup timings, so a measurement can be labelled with the state it was
+taken in. It identifies the case it can name and does not pretend to detect the rest:
+nothing in vLLM's log says whether torch's own caches were warm.
 
-## One container, engines as child processes, one endpoint
-
-**Single container.** Separate per-engine containers are not merely out of scope,
-they are wrong here: the value proposition is a shared, correct memory budget on
-one box, and once each engine is its own container, each believes it owns the GPU
-and nothing arbitrates. The ledger has to be built either way -- containers only
-remove the ability to see into the processes. Sharing the HF cache is also free
-in-container.
-
-**Engines as supervised child processes, not in-process.** In-process couples an
-engine segfault to the manager, and the manager is what has to notice and report
-it. Put a thin `EngineRuntime` interface at that boundary with a subprocess
-implementation only.
-
-**This is forced, not merely preferred: vLLM leaks in-process across engine
-starts**, badly enough that serving in-process is not available even if the
-supervision argument went the other way. The rule that follows is short and will be
-violated by the first person who tries to make the fit loop faster:
-
-> **One engine start per process, always.** No process is reused across engine
-> constructions -- not in the supervisor, not in the fit loop, not in the
-> characterizer.
-
-That forecloses the obvious optimization on `fit-shortlist`'s successor: keeping a
-warm process and re-constructing the engine with new parameters to skip interpreter
-start, imports and CUDA context creation. It is not available. Budget a full process
-launch per candidate configuration and design the loop around that cost rather than
-around removing it.
-
-**Open question, and it is an appliance question:** does the leak have a
-per-*request* component, or is it only per-engine-construction? An appliance is
-supposed to run unattended for weeks. If a long-lived engine process drifts, the
-supervisor needs uptime and RSS monitoring with a restart policy, and that is a v1
-feature rather than a later one.
-
-The prior is that it does not -- a per-request leak would hit ordinary vLLM operators
-hard enough to have been found. That prior is good but weaker for us than for them:
-**we do not run their code.** A fork plus several plugins with custom kernels and
-cache dtypes is exactly where a leak survives that mainstream serving would have
-flushed out. Which also cuts the other way -- if it is ours, it is both more
-tractable and more our job.
-
-**Fixing rather than routing around it is on the table**, since a fork is already
-being carried for EXL3. What prices that work is `TODO: start-latency`: the leak's
-cost is process launch minus engine construction, paid per engine start. If weight
-load dominates, fixing buys little; if interpreter start, imports and CUDA context
-dominate, it buys the fit loop and every model change. Measure before committing.
-
-**One OpenAI-compatible endpoint, not a port per instance.** vLLMManager's
-port-per-instance leaks manager state into every client config. A stable address
-that survives engine restarts means openwebui and agent configs are not rewritten
-on every model change, and gives somewhere to answer a coherent 503 when nothing
-is loaded rather than connection-refused. It is also the seam multi-engine lands
-on later, which is the second reason to have it on day one.
-
-Two ways to get the router wrong, both of which look fine in a smoke test:
-
-- **Buffering SSE.** Pass streamed chunks through unbuffered or every token
-  arrives in a clump.
-- **Swallowing client disconnects.** vLLM aborts generation when the client goes
-  away. A proxy that does not propagate the disconnect leaves orphaned requests
-  generating on a box with no spare GPU to burn.
-
-## The API is the only surface
-
-Manager and frontend talk over one contract, and the CLI is a client of it rather than
-a parallel implementation. The discipline that makes that hold is worth stating as a
-rule, because it is cheap from the start and near-impossible to retrofit:
-
-> **The manager has no internal path that bypasses its own API.** Every action the UI
-> can take is an action the API exposes, taken the same way.
-
-Without it the UI quietly grows privileged access, the CLI can never catch up, and
-maintaining both surfaces becomes the tax it was supposed to avoid.
-
-### Two transports, split by traffic shape
-
-- **State changes and queries** -- list configurations, create one, start or stop an
-  engine, fetch a fit result -- over plain HTTP. Curl-able, scriptable, testable with
-  no client library, and a CLI over it is nearly free.
-- **Events** -- engine state, log lines, fit-loop and depth-probe progress, telemetry
-  -- over a single multiplexed SSE stream with typed events.
-
-SSE rather than WebSockets because nothing in the management surface is actually
-bidirectional: every event is server-to-client and every command is fine as a POST. SSE
-rides the same HTTP stack, reconnects on its own, and is consumable with `curl`, which
-matters given the CLI is a first-class client here. WebSockets is the more flexible
-tool and stays the escape hatch for the case that would earn it -- an interactive
-console into a running engine is the plausible one.
-
-Two constraints that are easy to miss:
-
-- **One stream, not one per subject.** Browsers cap concurrent connections per origin
-  on HTTP/1.1, and a UI watching four things would spend the budget on plumbing.
-- **The stream is also what keeps request rate low.** POST has real overhead past some
-  rate of independent commands. The way that rate stays low is that clients never poll
-  for state -- so polling appearing anywhere is a signal that something belongs on the
-  stream instead.
-
-### The CLI is a generic client, not a mirrored command surface
-
-Parity is the trap: mirroring every UI feature into a command means maintaining two
-surfaces forever. Instead, one verb that speaks the API generically -- the shape
-`gh api` has -- plus a little sugar for what gets done constantly: run a named
-configuration, import and export the store. A new feature then costs no CLI work by
-default, and a shortcut is added only once a workflow proves hot.
-
-This is consistent with the day-one import/export requirement above rather than in
-tension with it: that is a data path and a hot workflow, not a mirror of the UI.
-
-### The API's first consumer is the CLI, and that is lucky
-
-The frontend will not exist for a while, so the contract gets exercised by the client
-that is cheapest to write, and the UI arrives against an API that has already been used
-in anger. It is also why the endpoint schema should not be designed up front: pick the
-transports now, because those are expensive to change, and let the endpoints accrete.
-
-### What "frontend foundation" means beyond the framework
-
-The built bundle is served by the same uvicorn process -- one port, one process, no
-separate node server in the container -- and the dev loop is HMR against a running
-manager. Neither is a large decision, but both are the difference between UI work being
-pleasant and being miserable, and the first one shapes the container.
-
-## Configurations are named and stored, however they were arrived at
-
-Two needs converge here, and they are the same store. **Today:** name and keep a
-configuration -- a `vllm serve` invocation plus its environment -- so one model can be
-run in several shapes and a test matrix can be selected by name rather than by editing
-a file. **Later:** somewhere the fit tiers deposit their answers, because tier 2 and 3
-results cost engine starts and load runs and must not be re-derived while the ground
-under them is unchanged. Entries differ only in provenance, so a derived config and a
-hand-written one are the same object.
-
-### The shell scripts already specify the format
-
-`~/ckpt/run-*.sh` is the mechanism today: one live invocation per file, three or four
-commented-out alternates. The names are already there -- `# 3.00bpw w/turboquant, long
-context`, `# 4.00bpw, real tight`, `# draft model, no turboquant` -- trapped in
-comments where nothing can select them. Read as a spec, the pile says:
-
-- **Args are not a key/value map.** `--cudagraph-capture-sizes 1 2 4` and
-  `--kv-cache-dtype-skip-layers sliding_window boundary:0` take several values.
-- **Some values are JSON with embedded quotes** (`--kv-transfer-config`,
-  `--speculative-config`). Storing the invocation as one string and re-splitting it
-  later mangles exactly these.
-- **Flag syntax is inconsistent within a single file** -- `--kv-cache-memory=1323302912`
-  next to `--gpu-memory-utilization 0.97`. Editing a stored line by text surgery is
-  therefore not a way to change a field, and the fit layer's whole job is changing
-  those fields.
-- **Environment is per-invocation and matters** -- `PYTORCH_CUDA_ALLOC_CONF=...`
-  before the torch import, `EXL3_RECONSTRUCT_THRESHOLD=0` -- so it is part of a
-  configuration, not ambient. A structured `env` map also removes a failure mode the
-  scripts have: in `sh`, a bare `VAR=value` on its own line sets a shell variable and
-  does *not* export it, so a knob can silently stop reaching the engine when a script is
-  reformatted. That exact slip was live in `run-qwen3.8-27b.sh`, and it is invisible
-  precisely because `expandable_segments` is a fragmentation knob -- it bites only after
-  days of uptime, which is how it was found in the first place (a multi-day SWE-bench run
-  that OOMed with elevated unavailable memory). (The `unset` in one script is a dev-environment artifact,
-  not a requirement: the image controls the base set exactly, and most such variables
-  take `=0` anyway.)
-
-So: **present the literal command line, store it structured.** The presentation is a
-real requirement, not a convenience -- a config you can paste into a shell is what
-makes this a credible replacement for the scripts, and what stops golite from being a
-place configurations get trapped the way the comments trap them now. Storage is args
-as a list and environment as a map, because the fit layer must rewrite one flag without
-parsing shell.
-
-### An entry that has never launched is a draft, not a configuration
-
-The pile rots because a commented-out block carries no evidence: nothing says whether
-it ever worked, on what, or when. That distinction is most of the cure and is nearly
-free. Every entry carries provenance -- hand-written or derived by which tier, when,
-against which box fingerprint and which fork and plugin versions -- and its last known
-outcome. Which is also what makes "unless something substantive changes underneath"
-mechanical rather than remembered: an entry knows what it depended on, so it can be
-marked stale instead of silently launching a configuration sized for different
-hardware.
-
-That failure is the quiet kind. A stale config still starts; it just serves a budget
-computed for a box you no longer have.
-
-### Linting is the cheapest version of the knowledge layer
-
-Before any fit tier exists, several documented traps are checkable statically against a
-stored entry -- no GPU, no engine start, no download:
-
-- `--max-model-len auto` together with `--max-num-seqs > 1`, which is overcommitted by
-  construction. One of the commented alternates in `run-qwen3.8-27b.sh` is already this
-  shape.
-- `--gpu-memory-utilization` above the box's free/total ratio.
-- A `--kv-cache-memory` pin taken from vLLM's own suggestion, which is biased low.
-
-This is worth building early precisely because it is the guidance layer in its
-cheapest form, and it proves the store is holding enough structure to reason about.
-
-### A database, with an exported view
-
-Configuration has to be **accessible** -- readable and editable by a human and by
-external tools. That is a property of an interface, though, not of the storage: in a
-container the files are not conveniently reachable anyway, and hand-editing them under
-a running manager creates a reconcile problem where either the file or the process has
-to lose. So accessibility is served by import/export and by generated reports, and the
-storage question is decided separately, on volume and complexity.
-
-On that question: **start on SQLite.** Not because the initial data warrants it -- it
-does not -- but because it likely will, and the migration cost is asymmetric. Starting
-there is nearly free; moving later is not. Three things sharpen it:
-
-- **Schema churn is answerable without giving up flexibility.** Store entries as JSON
-  documents with a handful of indexed columns for what is actually queried. Migrations
-  then bite only when a field is promoted to a column, which keeps legacy structure
-  scoped to the code that generates reports rather than spread through the store.
-- **Volume is asymmetric between the two halves.** Named configurations stay small and
-  few. The *evidence* attached to them does not: fit trials, certification runs,
-  transient slopes per call site per depth, start-latency phase breakdowns, each
-  multiplied by model, box and version. Configurations and their evidence are one
-  object conceptually and two tables practically.
-- **Atomic writes matter more here than diffability.** The supervisor writes runtime
-  state while other things read it, and an appliance is meant to run unattended. A
-  crash partway through rewriting a text file corrupts it; the database case is free.
-
-**The requirement this creates:** import and export from the CLI on day one. The
-immediate need is replacing a pile of shell scripts, and that predates any frontend --
-without a text round-trip the store is unusable before the UI exists. Export doubles as
-the report surface, and as the thing an owner can back up and commit.
-
-## Fit is four tiers, because the cheap ones are structurally blind
-
-The static tier cannot be fixed by better arithmetic. Each of these is a startup
-or mid-session fact, invisible to any amount of `config.json` reading (measured
-2026-09-02, see re-verification note below):
-
-- `gpu_memory_utilization` is a fraction of *total* but must fit within *free*.
-  The ceiling is the ratio of two numbers only the startup line prints
-  (15.28/15.51 = 0.985, hence 0.98). The gap is driver/context overhead and is not
-  recoverable.
-- vLLM's memory profiler can fail at a configuration **strictly cheaper** than one
-  that works: `max_num_batched_tokens` 128 profiles and serves, 256 over-allocates
-  and OOMs, over a true difference of 61 MiB against a 0.78 GiB margin.
-  Reproducible, so not allocator noise.
-- `enforce_eager` can cost *more* memory than CUDA graphs. Qwen3.8-27B in 15.9 GiB:
-  graphs reported 0.04 GiB of capture memory and usable KV went **up**, 46K to 67K
-  tokens. The common assumption that graphs are the memory-hungry option and eager
-  the safe fallback is not reliable; price it.
-
-And the launch tier is not sufficient either, which is the tier most likely to be
-skipped: **a transient that scales with cached context is invisible to the
-profiler**, which varies `max_num_batched_tokens` and nothing else. vLLM reports
-the same peak activation for a 4K session and a 130K one. Configs of that shape OOM
-*mid-session*, and no short test prompt can detect it. `max_num_seqs` has the same
-signature from the other direction -- essentially zero static cost, later OOM
-because the scheduler admits a batch the config was never sized for.
-
-| tier | cost | answers | instrument |
-|---|---|---|---|
-| 0 -- headers | kilobytes, no GPU, no download | can this checkpoint be split at the degrees this box has? is it worth the bandwidth? | `tp_preflight --remote`, `checkpoint_survey` |
-| 1 -- arithmetic | a `config.json` read | which candidates are worth spending a launch on? | new; Easy-vLLM's formula is the floor, not the answer |
-| 2 -- allocation | one **process launch** per candidate | does it start, and how much KV does it *actually* get? | vLLM's own startup reporting |
-| 3 -- depth | a load run per survivor | does it survive a full-context session at N concurrent? | guidellm as generator; `memprof` on failure |
-
-Tier 3 is the appliance verdict and the one nobody else produces. It is also
-guidellm's real job here -- not throughput numbers, but walking context depth and
-concurrency until the mid-session cliff appears.
+This looks like a vLLM defect rather than a golite problem -- a memory profiler should
+not be measuring the compiler -- and is worth reporting upstream rather than only worked
+around here.
 
 ### Warm before measuring, and warm before serving
 

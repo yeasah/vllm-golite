@@ -76,9 +76,22 @@ def test_auto_fit_is_visible_so_the_tautology_can_be_detected():
     assert (f["auto_fit_from"], f["auto_fit_to"]) == ("262144", "172032")
 
 
-def test_every_pattern_fires_against_the_real_capture():
-    facts = scan_capture().facts
-    unmatched = [p.keys for p in (*FACTS, *FLAGS) if not any(k in facts for k in p.keys)]
+def test_every_pattern_fires_across_the_three_compile_states():
+    """No single capture can fire every pattern -- the states are mutually exclusive and
+    vLLM reports different lines in each -- so coverage is checked against their union.
+    A pattern matching none of the three has stopped working."""
+    seen: set[str] = set()
+    states = set()
+    for path in sorted(CAPTURE.parent.glob("vllm-start-*.log")):
+        s = LogScanner()
+        with path.open() as fh:
+            for line in fh:
+                s.feed(line)
+        seen |= set(s.facts)
+        states.add(s.compile_state)
+
+    assert states == {"hit", "populating", "disabled"}, states
+    unmatched = [p.keys for p in (*FACTS, *FLAGS) if not any(k in seen for k in p.keys)]
     assert not unmatched, f"patterns stopped matching a real log: {unmatched}"
 
 
@@ -105,14 +118,37 @@ def test_every_pattern_declares_its_provenance():
     assert all(p.provenance in {"attested", "likely", "guessed"} for p in (*FACTS, *FLAGS))
 
 
-def test_the_two_captures_disagree_about_capacity():
-    """Two starts of the same configuration on the same card, 14% apart in context.
+def test_compile_state_is_read_from_the_log():
+    hit = LogScanner()
+    with (CAPTURE.parent / "vllm-start-warm-cache.log").open() as fh:
+        for line in fh:
+            hit.feed(line)
+    assert hit.compile_state == "hit"
+    assert scan_capture().compile_state == "disabled"
+    assert scan("INFO [backends.py:1094] Using cache directory: /c/rank_0_0/backbone "
+                "for vLLM's torch.compile").compile_state == "populating"
 
-    Kept as a fixture because the cause is *unknown*. An interleaved cold/warm
-    experiment ruled out vLLM's compile cache, which an earlier draft had blamed. What
-    the pair documents is the thing that matters regardless: persistent state outside
-    the configuration can move measured capacity, so a tier-2 result is a measurement of
-    one machine in one state.
+
+def test_a_disabled_cache_is_not_evidence_of_a_clean_measurement():
+    """The counterintuitive half, and the reason contamination is framed as compilation
+    volume rather than as a cache rule.
+
+    This capture has vLLM's compile cache *disabled* and still profiles the inflated
+    0.79 GiB, because torch's own caches -- which vLLM does not report on -- were cold at
+    the same time. A rule of "trust a start unless it was populating" would have accepted
+    it.
+    """
+    s = scan_capture()
+    assert s.compile_state == "disabled"
+    assert s.facts["peak_activation_gib"] == "0.79"
+    assert float(s.facts["graph_compile_seconds"]) > 8  # a lot of compiling happened
+
+
+def test_the_two_captures_disagree_about_capacity():
+    """Same configuration and card, 14% apart in resolved context.
+
+    The pair is kept because it is the evidence for sizing being contaminated by
+    compilation: heavy compiling in one, almost none in the other.
     """
     early = scan_capture().facts
     late = LogScanner()

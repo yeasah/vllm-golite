@@ -91,6 +91,12 @@ FACTS: tuple[Pattern, ...] = (
     _p("dynamo_seconds", r"Dynamo bytecode transform time:\s*([\d.]+)\s*s"),
     _p("compile_warmup_seconds",
        r"torch\.compile and initial profiling/warmup run together took ([\d.]+)\s*s"),
+    # With the cache enabled these are reported separately; disabled, they are merged
+    # into the line above. A comparison across states has to handle both shapes.
+    _p("compile_seconds", r"torch\.compile took ([\d.]+)\s*s in total"),
+    _p("profiling_warmup_seconds", r"Initial profiling/warmup run took ([\d.]+)\s*s"),
+    _p("graph_compile_seconds",
+       r"Compiling a graph for compile range \([^)]*\) takes ([\d.]+)\s*s"),
     _p("init_engine_seconds compilation_seconds",
        r"init engine .*?took ([\d.]+)\s*s \(compilation: ([\d.]+)\s*s\)"),
     _p("graph_capture_seconds graph_capture_gib",
@@ -98,10 +104,15 @@ FACTS: tuple[Pattern, ...] = (
     _p("checkpoint_gib", r"Checkpoint size:\s*([\d.]+)\s*GiB"),
 )
 
-#: Conditions worth knowing about that are not numbers.
+#: Which of the three compile-cache states a start was in. vLLM says so explicitly, and
+#: it matters because the profiling run that sizes the KV cache shares a process with
+#: compilation -- see docs/design.md. A start that *populates* the cache also collects
+#: AOT artifacts during the warmup run and profiles a larger transient.
 FLAGS: tuple[Pattern, ...] = (
-    # Compilation dominates a cold start, so this decides most of the startup cost.
     _p("compile_cache_disabled", r"(vLLM's torch\.compile cache is disabled)"),
+    _p("compile_cache_populating", r"Using cache directory: (\S+) for vLLM's torch\.compile"),
+    _p("compile_cache_hit", r"Directly load AOT compilation from path (\S+)"),
+    _p("compile_artifacts_bytes", r"collected artifacts: .*?([\d]+) bytes total"),
 )
 
 #: Failure signatures, most specific first -- the first match wins.
@@ -130,6 +141,25 @@ class LogScanner:
         self.facts: dict[str, str] = {}
         self.failure_kind: FailureKind | None = None
         self.failure_line: str | None = None
+
+    @property
+    def compile_state(self) -> str:
+        """`hit`, `populating`, `disabled`, or `unknown`.
+
+        Reported rather than judged. A populating start is known to profile a larger
+        transient, but `disabled` is **not** therefore safe: a disabled start on a box
+        where torch's own caches were also cold profiled the same inflated value. What
+        the state cannot tell us is how much compiling happened below vLLM, so this
+        identifies the one case we can name and leaves the rest to the measurement
+        protocol.
+        """
+        if "compile_cache_hit" in self.facts:
+            return "hit"
+        if "compile_cache_populating" in self.facts:
+            return "populating"
+        if "compile_cache_disabled" in self.facts:
+            return "disabled"
+        return "unknown"
 
     def feed(self, line: str) -> None:
         for pat in (*FACTS, *FLAGS):
