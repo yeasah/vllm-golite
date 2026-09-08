@@ -22,12 +22,20 @@ import uvicorn
 from fastapi import FastAPI
 
 
+class _QuietServer(uvicorn.Server):
+    def install_signal_handlers(self) -> None:
+        """Leave SIGINT to the caller: this server is embedded in a client."""
+
+
 @contextlib.asynccontextmanager
 async def running_server(app: FastAPI, host: str = "127.0.0.1") -> AsyncIterator[str]:
     """Serve `app` on an ephemeral port and yield its base URL."""
+    # `lifespan="on"`, because shutdown is where the engine gets stopped. And signal
+    # handlers off: uvicorn installs its own in the main thread, which would swallow the
+    # interrupt the client needs in order to shut an engine down before exiting.
     config = uvicorn.Config(app, host=host, port=0, log_level="warning",
-                            lifespan="off", access_log=False)
-    server = uvicorn.Server(config)
+                            lifespan="on", access_log=False)
+    server = _QuietServer(config)
     task = asyncio.create_task(server.serve(), name="untwisted-api")
     try:
         while not server.started:

@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -183,51 +184,98 @@ async def cmd_api(client: httpx.AsyncClient, args) -> int:
     return 0 if r.status_code < 400 else 1
 
 
-async def cmd_run(client: httpx.AsyncClient, args) -> int:
-    """Start an engine and watch the event stream until it settles.
+async def _watch_engine(client: httpx.AsyncClient, args) -> int:
+    """Consume the event stream until the engine settles.
 
-    A start is tens of seconds cold and over a minute on a fresh container, so the API
-    returns immediately and the outcome arrives here. This is what the stream is for.
+    No polling. `docs/design.md` says a client that polls for state is a sign the state
+    belongs on the stream, so the ready event carries everything worth printing and this
+    never asks the API a second question.
     """
-    r = await client.post("/api/engine/start", json={"ref": args.ref})
-    if r.status_code >= 400:
-        return _fail(r)
-
-    outcome = 1
+    served = False
     async with client.stream("GET", "/api/events", timeout=None) as stream:
         event = None
         async for line in stream.aiter_lines():
             if line.startswith("event: "):
                 event = line.removeprefix("event: ").strip()
-            elif line.startswith("data: ") and event == "engine.state":
-                data = json.loads(line.removeprefix("data: "))
-                state = data.get("state")
-                if state == "ready":
-                    print(f"ready on port {data['port']} in "
-                          f"{data['startup_seconds']:.1f}s")
-                    outcome = 0
-                    break
-                if state in ("failed", "stopped"):
-                    print(f"failed: {data.get('failure_kind') or data.get('error')}",
-                          file=sys.stderr)
-                    break
-            elif line.startswith("data: ") and event == "engine.log" and args.verbose:
-                print(json.loads(line.removeprefix("data: "))["line"], file=sys.stderr)
+                continue
+            if not line.startswith("data: "):
+                continue
+            data = json.loads(line.removeprefix("data: "))
 
-    if outcome == 0:
-        engine = (await client.get("/api/engine")).json()
-        for key in ("available_kv_cache_gib", "kv_cache_size_tokens",
-                    "maximum_concurrency", "peak_activation_gib"):
-            if key in engine["facts"]:
-                print(f"  {key:<26} {engine['facts'][key]}")
-        for reclaimed in engine["reclaimed_shm"]:
-            print(f"reclaimed abandoned shared memory: {reclaimed}", file=sys.stderr)
-        if not args.once:
-            print("\nserving; ctrl-c to stop", file=sys.stderr)
-            with contextlib.suppress(KeyboardInterrupt):
-                while (await client.get("/api/engine")).json()["state"] == "ready":
-                    await asyncio.sleep(1.0)
-    await client.post("/api/engine/stop")
+            if event == "engine.log":
+                if args.verbose:
+                    print(data["line"], file=sys.stderr)
+                continue
+            if event != "engine.state":
+                continue
+
+            state = data.get("state")
+            if state == "ready":
+                served = True
+                print(f"ready on port {data['port']} in {data['startup_seconds']:.1f}s"
+                      f" (compile cache: {data.get('compile_state')})")
+                for reclaimed in data.get("reclaimed_shm") or []:
+                    print(f"reclaimed abandoned shared memory: {reclaimed}",
+                          file=sys.stderr)
+                facts = data.get("facts") or {}
+                for key in ("available_kv_cache_gib", "kv_cache_size_tokens",
+                            "maximum_concurrency", "peak_activation_gib"):
+                    if key in facts:
+                        print(f"  {key:<26} {facts[key]}")
+                if args.once:
+                    return 0
+                print("\nserving; ctrl-c to stop", file=sys.stderr)
+            elif state in ("failed", "stopped"):
+                if served:
+                    return 0
+                detail = data.get("failure_summary") or data.get("failure_kind") \
+                    or data.get("error") or "no reason reported"
+                print(f"failed: {detail}", file=sys.stderr)
+                return 1
+    return 0 if served else 1
+
+
+async def cmd_run(client: httpx.AsyncClient, args) -> int:
+    """Start an engine and watch until it settles.
+
+    A start is tens of seconds cold and over a minute on a fresh container, so the API
+    returns at once and the outcome arrives on the stream.
+
+    The interrupt is handled rather than raised. An engine runs in its own session, so
+    Ctrl-C at this terminal never reaches it -- deliberate, since a stray interrupt must
+    not be able to kill a serving engine -- which makes stopping it on the way out this
+    client's job. Unwinding through a KeyboardInterrupt would leave that undone on a
+    closing event loop.
+    """
+    r = await client.post("/api/engine/start", json={"ref": args.ref})
+    if r.status_code >= 400:
+        return _fail(r)
+
+    interrupted = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(sig, interrupted.set)
+            installed.append(sig)
+
+    watcher = asyncio.create_task(_watch_engine(client, args))
+    waiter = asyncio.create_task(interrupted.wait())
+    try:
+        done, pending = await asyncio.wait({watcher, waiter},
+                                           return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        outcome = watcher.result() if watcher in done else 0
+    finally:
+        for sig in installed:
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+        # Always, including after an interrupt: nothing else will stop the engine.
+        with contextlib.suppress(Exception):
+            await client.post("/api/engine/stop", timeout=60.0)
     return outcome
 
 

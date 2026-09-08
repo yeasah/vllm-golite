@@ -21,7 +21,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, Body, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from vllm_untwisted.api.events import EventBus
@@ -63,8 +63,23 @@ def _run_out(run: RunRecord) -> RunOut:
     )
 
 
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Stop the engine when the manager goes away.
+
+    Not optional, and not something the operating system will do for us: engines are
+    spawned with `start_new_session=True` so a stray Ctrl-C at a terminal cannot take
+    down a serving engine by accident. The cost of that isolation is that nothing else
+    will ever clean up either -- shutting the manager down without this leaves a vLLM
+    holding the whole GPU, which is exactly the stray the reap tooling exists for.
+    """
+    yield
+    with contextlib.suppress(Exception):
+        await app.state.manager.stop()
+
+
 def create_app(store: Store | None = None, manager: Manager | None = None) -> FastAPI:
-    app = FastAPI(title="vllm-untwisted", version="0.0.1")
+    app = FastAPI(title="vllm-untwisted", version="0.0.1", lifespan=_lifespan)
     app.state.store = store or Store(_default_store())
     app.state.manager = manager or Manager(app.state.store, Supervisor())
     app.state.events = EventBus()
@@ -163,14 +178,22 @@ def create_app(store: Store | None = None, manager: Manager | None = None) -> Fa
             except Exception as exc:  # a start that fails to even launch
                 app.state.events.publish("engine.state", state="failed", error=str(exc))
                 return
+            # Everything a client needs about the outcome, on the event itself. A
+            # client that has to fetch the details afterwards is polling, and polling is
+            # the signal that something belongs on this stream.
             app.state.events.publish(
                 "engine.state",
                 state=str(started.record.state),
                 config=entry.name,
                 port=started.record.port,
                 startup_seconds=started.record.startup_seconds,
+                compile_state=manager.supervisor.compile_state,
+                facts=dict(started.record.facts),
+                reclaimed_shm=list(started.record.reclaimed_shm),
                 failure_kind=None if not started.record.failure
                 else str(started.record.failure.kind),
+                failure_summary=None if not started.record.failure
+                else started.record.failure.summary,
             )
 
         app.state.starting = asyncio.create_task(go(), name=f"start-{entry.name}")

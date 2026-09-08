@@ -90,3 +90,23 @@ def test_lint_is_quiet_and_zero_when_there_is_nothing_to_say(tmp_path, capsys):
     capsys.readouterr()
     assert run(tmp_path, "lint") == 0
     assert "nothing to report" in capsys.readouterr().err
+
+
+def test_run_leaves_nothing_behind(tmp_path, capsys):
+    """`--once` returns as soon as the engine is healthy, and the engine must be gone by
+    then: the CLI's finally is the only thing that will stop it."""
+    import json as _json
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    fake = str(_Path(__file__).parent / "fake_engine.py")
+    doc = [{"name": "fake", "model": "m", "launcher": [_sys.executable, fake], "args": []}]
+    path = tmp_path / "c.json"
+    path.write_text(_json.dumps(doc))
+    run(tmp_path, "import-json", str(path))
+    capsys.readouterr()
+
+    assert run(tmp_path, "run", "fake", "--once") == 0
+    out = capsys.readouterr().out
+    assert "ready on port" in out
+    assert "maximum_concurrency" in out  # came off the event, not a second request

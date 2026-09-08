@@ -192,3 +192,55 @@ async def test_unsubscribing_stops_delivery():
         assert bus.subscribers == 1
     assert bus.subscribers == 0
     bus.publish("engine.log", line="nobody is listening")
+
+
+async def test_shutting_the_manager_down_stops_the_engine(app):
+    """The leak this cost. Engines run in their own session so a stray Ctrl-C at a
+    terminal cannot kill a serving engine -- which means nothing but the manager will
+    ever stop one, and a manager that exits without doing so leaves a vLLM holding the
+    whole GPU."""
+    from vllm_untwisted.api.serve import running_server
+    from vllm_untwisted.engine import EngineState
+
+    async with running_server(app) as url, httpx.AsyncClient(base_url=url) as client:
+        await client.post("/api/configs", json=fake_config())
+        await client.post("/api/engine/start", json={"ref": "fake"})
+        for _ in range(200):
+            if (await client.get("/api/engine")).json()["state"] == "ready":
+                break
+            await asyncio.sleep(0.05)
+        assert app.state.manager.supervisor.state is EngineState.READY
+
+    # Leaving the context shuts the server down, which runs the lifespan.
+    assert app.state.manager.supervisor.state is EngineState.STOPPED
+
+
+async def test_the_ready_event_carries_what_a_client_would_otherwise_poll_for(app):
+    """`docs/design.md`: a client polling for state is the signal that the state belongs
+    on the stream. The ready event carries the facts so `run` never asks twice."""
+    from vllm_untwisted.api.serve import running_server
+
+    async with running_server(app) as url, httpx.AsyncClient(base_url=url) as client:
+        await client.post("/api/configs", json=fake_config())
+
+        async def watch() -> dict:
+            async with client.stream("GET", "/api/events", timeout=20.0) as stream:
+                event = None
+                async for line in stream.aiter_lines():
+                    if line.startswith("event: "):
+                        event = line.removeprefix("event: ").strip()
+                    elif line.startswith("data: ") and event == "engine.state":
+                        data = json.loads(line.removeprefix("data: "))
+                        if data.get("state") == "ready":
+                            return data
+            raise AssertionError("no ready event")
+
+        task = asyncio.create_task(watch())
+        await asyncio.sleep(0.3)
+        await client.post("/api/engine/start", json={"ref": "fake"})
+        data = await asyncio.wait_for(task, timeout=25)
+
+        assert data["facts"]["maximum_concurrency"] == "1.00"
+        assert data["compile_state"] is not None
+        assert "reclaimed_shm" in data
+        await client.post("/api/engine/stop")
