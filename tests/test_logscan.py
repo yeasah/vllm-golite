@@ -105,23 +105,24 @@ def test_every_pattern_declares_its_provenance():
     assert all(p.provenance in {"attested", "likely", "guessed"} for p in (*FACTS, *FLAGS))
 
 
-def test_a_warm_compile_cache_changes_what_the_profiler_measures():
-    """Not a latency detail: it moves the number vLLM sizes the KV cache from.
+def test_the_two_captures_disagree_about_capacity():
+    """Two starts of the same configuration on the same card, 14% apart in context.
 
-    Same configuration, same card, cache cold in one capture and hit in the other.
-    Peak activation halves and the resolved context grows by 14%, which means a fit
-    measured cold understates capacity.
+    Kept as a fixture because the cause is *unknown*. An interleaved cold/warm
+    experiment ruled out vLLM's compile cache, which an earlier draft had blamed. What
+    the pair documents is the thing that matters regardless: persistent state outside
+    the configuration can move measured capacity, so a tier-2 result is a measurement of
+    one machine in one state.
     """
-    cold = scan_capture().facts
-    warm = LogScanner()
+    early = scan_capture().facts
+    late = LogScanner()
     with (CAPTURE.parent / "vllm-start-warm-cache.log").open() as fh:
         for line in fh:
-            warm.feed(line)
-    warm = warm.facts
+            late.feed(line)
+    late = late.facts
 
-    assert float(warm["peak_activation_gib"]) < float(cold["peak_activation_gib"])
-    assert float(warm["available_kv_cache_gib"]) > float(cold["available_kv_cache_gib"])
-    assert int(warm["auto_fit_to"]) > int(cold["auto_fit_to"])
-    # Phase-timing lines are simply not printed on a cache hit, so a pattern that does
-    # not fire here is state, not a regression.
-    assert float(warm["compilation_seconds"]) < 1.0
+    assert early["peak_activation_gib"] == "0.79" and late["peak_activation_gib"] == "0.4"
+    assert int(late["auto_fit_to"]) > int(early["auto_fit_to"])
+    # Same card, same weights: the difference is not the configuration.
+    assert early["memory_total_gib"] == late["memory_total_gib"]
+    assert early["weights_gib"] == late["weights_gib"]

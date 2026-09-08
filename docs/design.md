@@ -78,32 +78,47 @@ plugin work invalidates the compile cache without changing anything the cache ke
 a stale artifact is worse than a slow start. The shipped image has a frozen plugin set,
 so it has no such problem: **the appliance should enable the compile cache.**
 
-Measured on the same configuration, cache written on the first start and hit on the
-next (warm figures identical across three consecutive runs):
+Measured on the same configuration, with `VLLM_DISABLE_COMPILE_CACHE` as the only
+variable and every other cache left warm, interleaved cold/warm/cold/warm:
 
-| | cold cache | warm cache |
+| | cold | warm |
 |---|---|---|
-| start to healthy | 81.2 s | **24.1 s** |
-| init engine | 63.5 s (compilation 22.2 s) | 6.4 s (compilation 0.4 s) |
-| peak activation | 0.79 GiB | **0.40 GiB** |
-| available KV cache | 3.01 GiB | **3.41 GiB** |
-| `--max-model-len auto` resolved to | 172,032 | **196,608 tokens** |
+| start to healthy | 32.1 s | **24.1 s** |
+| compilation | 9.4 s | 0.4 s |
+| peak activation, KV cache, resolved context | identical | identical |
 
-**The second half of that table is the part worth stopping on.** A warm cache did not
-only start faster, it profiled *half* the peak activation, and `auto` therefore resolved
-to 14% more context. Compilation happens in the same process before the profiling run,
-so a cold cache leaves the allocator in a state that inflates the measured transient --
-and vLLM sizes the KV cache from that measurement.
+A genuinely cold box is worse than the cold arm above -- the first start on this
+machine took 74-81 s with compilation reported at 22-50 s, because torch's own inductor
+cache (`/tmp/torchinductor_ypell`, 227 MB here) was cold too and is not the same cache.
+**That is the appliance's first-boot condition**, so both numbers matter: a fresh
+container pays the large one once per model, and every model change after pays the
+small one.
 
-Two consequences, both for the fit tiers:
+### An unexplained 14% of capacity, which is a fit-cache problem
 
-- **A fit measured on a cold compile cache understates capacity**, here by 14%. So
-  compile-cache state belongs in the fit cache key, or tier 2 must always measure warm
-  and say so.
-- **Pinning `--kv-cache-memory` from a cold start freezes the smaller cache
-  permanently**, since pinning also suppresses the profile run that would have found the
-  larger one. That is the trap already listed above, arriving by a route nobody would
-  look for.
+The first two starts on this box profiled **0.79 GiB of peak activation** and resolved
+`--max-model-len auto` to **172,032 tokens**. Every start since -- five of them,
+including both arms of the experiment above -- profiled **0.40 GiB** and resolved to
+**196,608 tokens**, and the transition has not reverted.
+
+An earlier draft of this note attributed that to the compile cache. **It does not:** the
+cold arm above has vLLM's compile cache explicitly disabled and still profiles the small
+transient. Something else on this machine cached between the second and third start and
+changed the measured capacity by 14%. Untested candidates include the flashinfer
+autotune cache, torch's inductor cache, and JIT warmup state; the cause is not
+established and should not be guessed at again in this file.
+
+What matters for the design does not depend on the cause:
+
+- **Persistent state outside the configuration can move measured capacity by 14%.**
+  Measuring instead of estimating is necessary and *not sufficient* -- a tier-2 result is
+  a measurement of one machine in one state, and that state is not fully enumerable.
+- So a stored fit result needs its provenance and a staleness rule that can be
+  conservative about things it cannot name, and the first measurement on a fresh box
+  should be treated as suspect until a second agrees with it.
+- Pinning `--kv-cache-memory` from an early start would have frozen the smaller cache
+  permanently, because pinning also suppresses the profile run that would later have
+  found the larger one.
 
 The cache is only safe because the plugin set cannot change underneath it, which is the
 same self-description requirement the fit cache has.
