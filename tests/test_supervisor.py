@@ -104,3 +104,26 @@ async def test_a_failed_start_leaves_nothing_behind(sup):
     await sup.stop()
     assert sup.state is EngineState.STOPPED
     assert sup._handle is None and sup._pump is None
+
+
+async def test_start_reclaims_abandoned_shm_and_records_it(tmp_path):
+    """A crashed engine's region is adopted by the next start whose size matches, so the
+    sweep runs before the spawn -- and says what it took, because a silent 8 GB
+    reclamation is a fact worth having when the next surprise arrives."""
+    stale = tmp_path / "vllm_offload_deadbeef.mmap"
+    stale.write_bytes(b"\0" * 4096)
+
+    sup = Supervisor(start_timeout=15.0, poll_interval=0.05, shm_root=str(tmp_path))
+    async with running(cfg(), supervisor=sup) as s:
+        assert not stale.exists()
+        assert any("vllm_offload_deadbeef" in entry for entry in s.record.reclaimed_shm)
+
+
+async def test_sweeping_can_be_turned_off(tmp_path):
+    stale = tmp_path / "vllm_offload_deadbeef.mmap"
+    stale.write_bytes(b"\0" * 4096)
+    sup = Supervisor(start_timeout=15.0, poll_interval=0.05,
+                     shm_root=str(tmp_path), sweep_shm=False)
+    async with running(cfg(), supervisor=sup) as s:
+        assert stale.exists()
+        assert s.record.reclaimed_shm == ()

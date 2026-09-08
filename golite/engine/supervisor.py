@@ -24,6 +24,7 @@ import httpx
 
 from golite.engine.config import EngineConfig
 from golite.engine.logscan import LogScanner
+from golite.engine import shm
 from golite.engine.runtime import EngineHandle, EngineRuntime, SubprocessRuntime
 from golite.engine.state import EngineRecord, EngineState, Failure, FailureKind
 
@@ -56,6 +57,8 @@ class Supervisor:
         health_path: str = "/health",
         start_timeout: float = 600.0,
         poll_interval: float = 0.5,
+        sweep_shm: bool = True,
+        shm_root: str = shm.SHM_ROOT,
     ) -> None:
         self.runtime = runtime or SubprocessRuntime()
         self.health_path = health_path
@@ -64,6 +67,11 @@ class Supervisor:
         #: amortized by reusing a process -- see the leak note in docs/design.md.
         self.start_timeout = start_timeout
         self.poll_interval = poll_interval
+        #: Reclaim shared-memory regions a crashed engine left behind, before starting.
+        #: On by default because the failure it prevents is silent: a leftover region of
+        #: matching size is adopted as the new engine's KV cache. See `golite.engine.shm`.
+        self.sweep_shm = sweep_shm
+        self.shm_root = shm_root
 
         self.record: EngineRecord | None = None
         self._handle: EngineHandle | None = None
@@ -98,6 +106,15 @@ class Supervisor:
         self._scanner = LogScanner()
         self._log.clear()
 
+        # Before anything else. A region left by a crashed engine is adopted silently by
+        # the next start whose size matches, which is the retry case exactly.
+        reclaimed: tuple[str, ...] = ()
+        if self.sweep_shm:
+            reclaimed = tuple(
+                f"{r.path} ({r.size_bytes / 2**30:.2f} GiB)"
+                for r in shm.sweep(self.shm_root)
+            )
+
         port = port or pick_free_port()
         record = EngineRecord(
             id=uuid.uuid4().hex[:8],
@@ -105,6 +122,7 @@ class Supervisor:
             state=EngineState.STARTING,
             port=port,
             started_at=time.monotonic(),
+            reclaimed_shm=reclaimed,
         )
         self.record = record
 

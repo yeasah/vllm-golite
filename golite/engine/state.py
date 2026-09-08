@@ -67,6 +67,10 @@ class EngineRecord:
     facts: dict[str, str] = field(default_factory=dict)
     started_at: float | None = None
     ready_at: float | None = None
+    #: Shared-memory regions a previous crash left behind, reclaimed before this start.
+    #: Recorded rather than silently cleaned: adopting one of these as a KV cache is the
+    #: quietest corruption this stack has, so its near miss belongs in the record.
+    reclaimed_shm: tuple[str, ...] = ()
 
     @property
     def uptime(self) -> float | None:
